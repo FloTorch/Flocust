@@ -10,10 +10,10 @@
 - **Configurable load** — Concurrency (virtual users), target requests per second, and total request count.
 - **Flexible prompts** — Load from a prompts file (JSON/JSONL) or generate prompts via a one-shot LLM call.
 - **Streaming and non-streaming** — Default streaming for full metrics; optional non-streaming for latency-only measurement.
-- **Per-request results** — `result.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, token counts, success/error.
+- **Per-request results** — `results.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, token counts, success/error.
 - **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, total tokens, and actual RPS.
 - **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`).
-- **CLI** — Interactive prompts for all inputs; run load test and view report/dashboard.
+- **CLI** — Load from `config.json` or interactive prompts; run load test and view report/dashboard.
 - **REST API** — Single run endpoint (file upload or prompt generation), report download, and health check.
 
 ---
@@ -40,13 +40,15 @@ Or install dependencies only:
 pip install -r requirements.txt
 ```
 
-Verify the CLI is available (starts the interactive flow):
+Verify the CLI is available:
 
 ```bash
 flocust
 # or
 python -m flocust.cli
 ```
+
+When `config.json` exists in the current directory, the CLI loads all settings from it. Otherwise it runs interactively.
 
 ---
 
@@ -69,12 +71,14 @@ Flocust/
 │   └── common/                # Shared logic
 │       ├── __init__.py
 │       ├── analyzer.py        # compute_report, write_report
-│       ├── config.py          # RunConfig (Pydantic)
-│       ├── dashboard.py      # Console report display
-│       ├── loader.py         # load_prompts (JSON/JSONL)
-│       ├── models.py         # RequestResult, ReportCard
-│       ├── runner.py         # Locust user, run_experiment()
-│       └── tokenizer.py      # tiktoken count_tokens
+│       ├── config.py          # RunConfig, ConfigFile, load_config_from_file
+│       ├── dashboard.py       # Console report display
+│       ├── loader.py          # load_prompts (JSON/JSONL)
+│       ├── models.py          # RequestResult, ReportCard
+│       ├── runner.py          # Locust user, run_experiment()
+│       ├── tokenizer.py       # tiktoken count_tokens
+│       └── utils.py           # Shared utilities (percentile, etc.)
+├── config.json               # Optional config (provider, bench, input_file)
 ├── prompts.jsonl             # Example prompts (for CLI or API)
 ├── pyproject.toml
 ├── requirements.txt
@@ -85,9 +89,57 @@ Flocust/
 
 ## Running the CLI
 
-The CLI runs an interactive flow: you provide base URL, API key, model, load parameters, and either a prompts file path or prompt generation. Results and the report are written under `artifacts/`.
+The CLI supports two modes:
 
-### 1. Prepare a prompts file (optional)
+1. **Config file** — When `config.json` exists in the current directory, all settings are loaded from it (no prompts).
+2. **Interactive** — When no config file is found, you are prompted for base URL, API key, model, load parameters, and either a prompts file or prompt generation.
+
+Results and the report are written under `artifacts/`.
+
+### Option A: Use config.json
+
+Place a `config.json` in the project root (or run `flocust` from that directory):
+
+```json
+{
+  "provider": "openai",
+  "provider_settings": {
+    "api_key": "YOUR_API_KEY",
+    "model": "flotorch/gemini-flash",
+    "base_url": "https://qa-gateway.flotorch.cloud/openai/v1",
+    "headers": {}
+  },
+  "bench": {
+    "concurrency": 20,
+    "requests": 500,
+    "duration_sec": 0,
+    "timeout_sec": 60,
+    "max_tokens": 50
+  },
+  "input_file": "prompts.jsonl",
+  "report": { "format": "console" }
+}
+```
+
+Then run:
+
+```bash
+flocust
+```
+
+To use a config file elsewhere:
+
+```bash
+flocust --config path/to/config.json
+# or
+flocust -c path/to/my_config.json
+```
+
+**Config fields:** `provider_settings` (api_key, model, base_url), `bench` (concurrency, requests, duration_sec, timeout_sec, max_tokens), `input_file` (path to prompts file, relative to config file location). If `duration_sec` is 0, the run stops after `requests` are completed; otherwise RPS is derived from requests/duration.
+
+### Option B: Interactive mode
+
+#### 1. Prepare a prompts file (optional)
 
 If you do **not** use “generate prompts via LLM”, you need a prompts file in the current directory (or path you will enter). One prompt per line (JSONL) or a JSON array:
 
@@ -104,7 +156,7 @@ Summarize the concept of recursion in one sentence.
 ["What is 2+2?", "Summarize the concept of recursion in one sentence."]
 ```
 
-### 2. Run the CLI
+#### 2. Run the CLI
 
 From the project root (where `prompts.jsonl` lives, if you use a file):
 
@@ -118,7 +170,7 @@ Or:
 python -m flocust.cli
 ```
 
-### 3. Follow the prompts
+#### 3. Follow the prompts
 
 You will be asked for:
 
@@ -135,10 +187,10 @@ You will be asked for:
 | Generate prompts via LLM? | If `y`, prompts are generated by one LLM call; no file needed | `y` / `n` |
 | (If not generating) Prompts file | Path to prompts file | `prompts.jsonl` |
 
-### 4. Output
+#### 4. Output
 
 - **Artifacts directory** — `artifacts/<model>-users<N>-rps<R>/` containing:
-  - `result.jsonl` — One JSON object per request (latency, TTFT, tokens, etc.).
+  - `results.jsonl` — One JSON object per request (latency, TTFT, tokens, etc.).
   - `report.json` — Aggregated report (latency percentiles, TTFT, RPS, token totals).
 - **Console** — Summary and dashboard (when available).
 
@@ -239,7 +291,7 @@ Expected response: `{"status": "ok"}`.
 
 ## Output formats
 
-### result.jsonl
+### results.jsonl
 
 One JSON object per line, one line per request. Example:
 
@@ -268,7 +320,7 @@ Aggregated metrics for the run. Example:
   "total_output_tokens": 450,
   "total_tokens": 1650,
   "requests_per_second_actual": 4.8,
-  "result_file": "result.jsonl",
+  "result_file": "results.jsonl",
   "notes": null
 }
 ```
