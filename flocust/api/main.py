@@ -22,7 +22,13 @@ app = FastAPI(
 app.include_router(router)
 
 
-@app.get("/", summary="Health and API info")
+@app.get("/health", summary="Health check")
+def health() -> dict:
+    """Health check for load balancers and monitoring. Returns 200 when the service is up."""
+    return {"status": "ok"}
+
+
+@app.get("/", summary="API info")
 def root() -> dict:
     """
     Return service name and links to OpenAPI docs.

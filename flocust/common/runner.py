@@ -6,13 +6,16 @@ Uses programmatic Locust API for accurate metrics and comprehensive load testing
 
 import json
 import random
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 
 import gevent
+import httpx
 from locust import HttpUser, constant_throughput, task, events
 from locust.env import Environment
 from locust.log import setup_logging
@@ -21,6 +24,11 @@ from flocust.common.config import RunConfig
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
 from flocust.common.tokenizer import count_tokens
+
+# Default count for LLM-generated prompts (10–20% of num_requests).
+GENERATE_PROMPTS_DEFAULT_PERCENT = 0.15
+GENERATE_PROMPTS_MIN = 1
+GENERATE_PROMPTS_MAX = 500
 
 RESULTS_FILENAME = "results.jsonl"
 FLUSH_EVERY_LINES = 10
@@ -107,16 +115,60 @@ def _increment_progress():
     _progress_current += 1
 
 
+def _generate_prompts_via_llm(config: RunConfig, count: int) -> list[str]:
+    """
+    Call the LLM once (non-streaming) to generate `count` short prompts.
+    Returns list of prompt strings (one per line from response).
+    """
+    url = f"{config.base_url.rstrip('/')}/chat/completions"
+    payload = {
+        "model": config.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    f"Generate exactly {count} short prompts for testing an LLM API. "
+                    "Each prompt should be one line, 1-2 sentences, varied topics (questions, tasks, summaries). "
+                    "Output only the prompts, one per line, no numbering or bullets."
+                ),
+            }
+        ],
+        "max_tokens": min(4096, count * 80),
+        "temperature": 0.7,
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    content = ""
+    choices = data.get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        msg = choices[0].get("message") or {}
+        if isinstance(msg, dict):
+            content = (msg.get("content") or "").strip()
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    # Trim to count; if fewer, duplicate to reach at least count
+    if len(lines) < count:
+        while len(lines) < count:
+            lines.extend(lines[: count - len(lines)])
+    return lines[:count]
+
+
 class LLMUser(HttpUser):
     """High-performance Locust user for LLM API load testing."""
 
     def __init__(self, environment):
         super().__init__(environment)
         if not hasattr(environment, "_prompts_loaded"):
-            environment._prompts_loaded = load_prompts(Path(self.environment.parsed_options.prompts_path))
+            path = Path(self.environment.parsed_options.prompts_path)
+            environment._prompts_loaded = load_prompts(path)
             if not environment._prompts_loaded:
-                raise ValueError(f"No prompts loaded from {self.environment.parsed_options.prompts_path}")
-
+                raise ValueError(f"No prompts loaded from {path}")
         self.prompts = environment._prompts_loaded
 
     def on_start(self):
@@ -134,90 +186,123 @@ class LLMUser(HttpUser):
 
     @task
     def chat_completion(self):
-        """Make a chat completion request."""
+        """Make a chat completion request (stream or non-stream)."""
         req_id, prompt = self._next_prompt()
-
+        stream = self.environment.parsed_options.stream
         payload = {
             "model": self.environment.parsed_options.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": self.environment.parsed_options.max_tokens,
             "temperature": 0.0,
-            "stream": True,
+            "stream": stream,
         }
 
         start_time = time.perf_counter_ns()
-        ttft_start = None
         content = ""
         status_code = 0
         error_msg = None
-        inter_token_latencies = []
-        last_token_time = None
-        token_count = 0
+        ttft_ms = None
+        inter_token_latencies: list[float] = []
+        output_tokens = 0
 
-        try:
-            timeout = self.environment.parsed_options.timeout
-            with self.client.post(
-                "/chat/completions",
-                json=payload,
-                stream=True,
-                timeout=timeout,
-                catch_response=True,
-            ) as response:
-                status_code = response.status_code
-                ttft_start = time.perf_counter_ns()
-
-                buffer = b""
-                seen_done = False
-                for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
-                    if not chunk:
-                        continue
-                    chunk_time = time.perf_counter_ns()
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        try:
-                            line_str = line.decode("utf-8", errors="ignore").strip()
-                        except Exception:
+        if stream:
+            ttft_start = None
+            last_token_time = None
+            token_count = 0
+            try:
+                timeout = self.environment.parsed_options.timeout
+                with self.client.post(
+                    "/chat/completions",
+                    json=payload,
+                    stream=True,
+                    timeout=timeout,
+                    catch_response=True,
+                ) as response:
+                    status_code = response.status_code
+                    ttft_start = time.perf_counter_ns()
+                    buffer = b""
+                    seen_done = False
+                    for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
+                        if not chunk:
                             continue
-                        if not line_str.startswith("data: "):
-                            continue
-                        data_str = line_str[6:].strip()
-                        if data_str == "[DONE]":
-                            seen_done = True
-                            buffer = b""
-                            break
-                        content_piece = self._parse_one_sse_line(data_str)
-                        if content_piece:
-                            if ttft_start is None:
-                                ttft_start = chunk_time
-                            content += content_piece
-                            token_count += 1
-                            if last_token_time is not None:
-                                inter_token_latencies.append((chunk_time - last_token_time) / 1e6)
-                            last_token_time = chunk_time
-                            if len(content) > 1000:
+                        chunk_time = time.perf_counter_ns()
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            try:
+                                line_str = line.decode("utf-8", errors="ignore").strip()
+                            except Exception:
+                                continue
+                            if not line_str.startswith("data: "):
+                                continue
+                            data_str = line_str[6:].strip()
+                            if data_str == "[DONE]":
+                                seen_done = True
+                                buffer = b""
                                 break
-                    if seen_done or len(content) > 1000:
-                        break
+                            content_piece = self._parse_one_sse_line(data_str)
+                            if content_piece:
+                                if ttft_start is None:
+                                    ttft_start = chunk_time
+                                content += content_piece
+                                token_count += 1
+                                if last_token_time is not None:
+                                    inter_token_latencies.append((chunk_time - last_token_time) / 1e6)
+                                last_token_time = chunk_time
+                                if len(content) > 1000:
+                                    break
+                            if seen_done or len(content) > 1000:
+                                break
+                    if status_code == 200:
+                        response.success()
+                    else:
+                        response.failure(f"HTTP {status_code}")
+            except Exception as e:
+                status_code = 0
+                error_msg = str(e)[:200]
+            end_time = time.perf_counter_ns()
+            latency_ms = (end_time - start_time) / 1e6
+            ttft_ms = ((ttft_start - start_time) / 1e6) if ttft_start and ttft_start >= start_time else None
+            output_tokens = token_count
+        else:
+            try:
+                timeout = self.environment.parsed_options.timeout
+                with self.client.post(
+                    "/chat/completions",
+                    json=payload,
+                    stream=False,
+                    timeout=timeout,
+                    catch_response=True,
+                ) as response:
+                    status_code = response.status_code
+                    if status_code == 200:
+                        try:
+                            data = response.json()
+                            choices = data.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                msg = choices[0].get("message") or {}
+                                if isinstance(msg, dict):
+                                    content = (msg.get("content") or "").strip()
+                            usage = data.get("usage") or {}
+                            if isinstance(usage, dict) and "completion_tokens" in usage:
+                                output_tokens = int(usage["completion_tokens"])
+                            else:
+                                output_tokens = count_tokens(content, self.environment.parsed_options.encoding)
+                            response.success()
+                        except Exception:
+                            response.failure("Invalid JSON response")
+                            status_code = 0
+                            error_msg = "Invalid JSON response"
+                    else:
+                        response.failure(f"HTTP {status_code}")
+            except Exception as e:
+                status_code = 0
+                error_msg = str(e)[:200]
+            end_time = time.perf_counter_ns()
+            latency_ms = (end_time - start_time) / 1e6
 
-                if status_code == 200:
-                    response.success()
-                else:
-                    response.failure(f"HTTP {status_code}")
-
-        except Exception as e:
-            status_code = 0
-            error_msg = str(e)[:200]
-
-        end_time = time.perf_counter_ns()
-        latency_ms = (end_time - start_time) / 1e6
-        ttft_ms = ((ttft_start - start_time) / 1e6) if ttft_start and ttft_start >= start_time else None
-
-        # Only store raw list; percentiles computed once in analyzer (avoid per-request sort/cost)
         input_tokens = _cached_input_tokens(prompt, self.environment.parsed_options.encoding)
-        output_tokens = token_count
         success = status_code == 200
-
         result = RequestResult(
             req_id=req_id,
             input_prompt=prompt,
@@ -232,10 +317,8 @@ class LLMUser(HttpUser):
         result.inter_token_latencies = inter_token_latencies
 
         _file_write_queue.put(result)
-
         with _results_lock:
             _results.append(result)
-
         _increment_progress()
 
     def _parse_one_sse_line(self, data_str: str) -> str:
@@ -332,6 +415,7 @@ def _run_experiment_programmatic(
         "prompts_path": str(config.prompts_path),
         "encoding": config.encoding,
         "timeout": (10, 30),
+        "stream": config.stream,
     })()
 
     env.host = config.base_url.rstrip("/")
@@ -369,8 +453,24 @@ def run_experiment(
     """
     Run a single load test experiment using programmatic Locust API.
     Runs at target RPS with given concurrency until num_requests are completed.
+    When generate_prompts=True, generates prompts via one LLM call first.
     Writes result.jsonl and returns (results, result_path, output_dir, duration_seconds).
     """
+    generated_prompts_temp_dir: Path | None = None
+    if config.generate_prompts:
+        count = config.generate_prompts_count
+        if count is None:
+            count = max(
+                GENERATE_PROMPTS_MIN,
+                min(GENERATE_PROMPTS_MAX, int(config.num_requests * GENERATE_PROMPTS_DEFAULT_PERCENT)),
+            )
+        count = max(GENERATE_PROMPTS_MIN, min(GENERATE_PROMPTS_MAX, count))
+        prompts_list = _generate_prompts_via_llm(config, count)
+        generated_prompts_temp_dir = Path(tempfile.mkdtemp(prefix="flocust_prompts_"))
+        prompts_path = generated_prompts_temp_dir / "prompts.jsonl"
+        prompts_path.write_text("\n".join(prompts_list), encoding="utf-8")
+        config = config.model_copy(update={"prompts_path": prompts_path})
+
     prompts_path = Path(config.prompts_path)
     if not prompts_path.exists():
         raise FileNotFoundError(f"Prompts file not found: {prompts_path}")
@@ -388,5 +488,10 @@ def run_experiment(
         _stop_async_writer()
         _show_progress()
         print()
+        if generated_prompts_temp_dir is not None and generated_prompts_temp_dir.exists():
+            try:
+                shutil.rmtree(generated_prompts_temp_dir, ignore_errors=True)
+            except OSError:
+                pass
 
     return results, result_path, out_dir, duration_seconds

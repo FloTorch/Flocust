@@ -48,9 +48,26 @@ class RunConfig(BaseModel):
     concurrency: int = Field(ge=1, le=10_000, description="Number of concurrent users")
     requests_per_second: float = Field(ge=0.1, le=10_000.0, description="Target requests per second")
     max_tokens: int = Field(ge=1, le=128_000, default=1024, description="Max tokens per completion")
-    prompts_path: Path = Field(..., description="Path to prompts.json or prompts.jsonl")
+    prompts_path: Path | None = Field(
+        default=None,
+        description="Path to prompts.json or prompts.jsonl. Required unless generate_prompts=True.",
+    )
     output_dir: Path = Field(default_factory=lambda: Path("."), description="Directory for result.jsonl and report")
     num_requests: int = Field(ge=1, le=1_000_000, default=100, description="Total number of requests to run (stop when reached)")
+    stream: bool = Field(
+        default=True,
+        description="Use streaming; if False, only latency is measured (no TTFT/inter-token).",
+    )
+    generate_prompts: bool = Field(
+        default=False,
+        description="Generate prompts via one LLM call (10–20% of num_requests) and use for load test.",
+    )
+    generate_prompts_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Number of prompts to generate. Default: max(1, num_requests // 10).",
+    )
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(
         default="cl100k_base",
         description="Tiktoken encoding for token counting",
@@ -62,6 +79,12 @@ class RunConfig(BaseModel):
         if isinstance(data, dict) and "base_url" in data and data["base_url"]:
             data = {**data, "base_url": _normalize_base_url(data["base_url"])}
         return data
+
+    @model_validator(mode="after")
+    def require_prompts_path_unless_generate(self) -> "RunConfig":
+        if not self.generate_prompts and self.prompts_path is None:
+            raise ValueError("prompts_path is required when generate_prompts is False")
+        return self
 
     @property
     def chat_completions_url(self) -> str:

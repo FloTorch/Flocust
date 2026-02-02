@@ -1,53 +1,46 @@
 # Flocust
 
-Production-ready **LLM endpoint load testing** with [Locust](https://locust.io). Benchmark latency, time-to-first-token (TTFT), and token counts per request.
+**Flocust** is a production-ready LLM endpoint load testing tool built on [Locust](https://locust.io). It benchmarks OpenAI-compatible chat completion APIs with configurable concurrency and throughput, and reports latency, time-to-first-token (TTFT), inter-token latency, and token usage per request.
+
+---
 
 ## Features
 
-- **OpenAI-compatible API**: `POST /chat/completions` with streaming for TTFT.
-- **Configurable load**: Concurrency, target RPS, duration, max tokens.
-- **Prompts**: Load from `prompts.json` or `prompts.jsonl`.
-- **Per-request results**: `result.jsonl` with `req_id`, `input_prompt`, `output_result`, `latency_ms`, `ttft_ms`, `input_tokens`, `output_tokens`.
-- **Report card**: `report.json` with average latency, p50/p90/p95/p99, TTFT stats, total tokens, actual RPS.
-- **Token counting**: Fast [tiktoken](https://github.com/openai/tiktoken) (cl100k_base, o200k_base, etc.).
-- **CLI**: Interactive prompts for all inputs, then run and print report.
-- **FastAPI server**: Same workflow via `POST /api/experiments/run`.
+- **OpenAI-compatible API** — Targets `POST /chat/completions` with optional streaming for TTFT and inter-token metrics.
+- **Configurable load** — Concurrency (virtual users), target requests per second, and total request count.
+- **Flexible prompts** — Load from a prompts file (JSON/JSONL) or generate prompts via a one-shot LLM call.
+- **Streaming and non-streaming** — Default streaming for full metrics; optional non-streaming for latency-only measurement.
+- **Per-request results** — `result.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, token counts, success/error.
+- **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, total tokens, and actual RPS.
+- **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`).
+- **CLI** — Interactive prompts for all inputs; run load test and view report/dashboard.
+- **REST API** — Single run endpoint (file upload or prompt generation), report download, and health check.
 
-## Project structure
+---
 
-```
-Flocust/
-├── flocust/
-│   ├── __init__.py
-│   ├── cli.py           # CLI entry (flocust or python -m flocust.cli)
-│   ├── config.py        # RunConfig (Pydantic)
-│   ├── models.py        # RequestResult, ReportCard
-│   ├── loader.py        # load_prompts (JSON/JSONL)
-│   ├── tokenizer.py     # tiktoken count_tokens
-│   ├── runner.py        # Locust LLM user, run_experiment(), result collection
-│   ├── analyzer.py      # compute_report, write_report
-│   └── api/
-│       ├── __init__.py
-│       ├── main.py      # FastAPI app
-│       ├── routes.py    # POST /api/experiments/run
-│       └── schemas.py   # RunExperimentRequest, RunExperimentResponse
-├── prompts.jsonl        # Example prompts
-├── pyproject.toml
-├── requirements.txt
-└── README.md
-```
+## Prerequisites
 
-## Install
+- **Python 3.10+**
+- An **OpenAI-compatible** chat completions endpoint (e.g. OpenAI, Azure OpenAI, or any provider exposing the same API).
+- For TTFT and inter-token metrics, the API must support **streaming** (`stream: true`) and return SSE or JSON chunks.
+
+---
+
+## Installation
+
+From the project root:
 
 ```bash
 pip install -e .
-# or
+```
+
+Or install dependencies only:
+
+```bash
 pip install -r requirements.txt
 ```
 
-## CLI
-
-Run the interactive CLI (prompts for base_url, api_key, model, concurrency, RPS, max_tokens, prompts path, output dir, duration, encoding):
+Verify the CLI is available (starts the interactive flow):
 
 ```bash
 flocust
@@ -55,104 +48,212 @@ flocust
 python -m flocust.cli
 ```
 
-Outputs:
+---
 
-- `result.jsonl` in the chosen output directory (one JSON object per line per request).
-- `report.json` with the report card (average_latency, p90, etc.).
-- Report JSON printed to stdout.
+## Project structure
 
-## FastAPI server
+```
+Flocust/
+├── flocust/
+│   ├── __init__.py
+│   ├── api/                    # FastAPI application
+│   │   ├── __init__.py
+│   │   ├── constants.py       # API defaults, service name
+│   │   ├── main.py            # FastAPI app, /health, /
+│   │   ├── report_registry.py # Temp report storage (TTL)
+│   │   ├── routes.py          # POST /api/run, GET /api/report
+│   │   └── schemas.py         # Request/response models
+│   ├── cli/
+│   │   ├── __init__.py
+│   │   └── main.py            # CLI entry (flocust)
+│   └── common/                # Shared logic
+│       ├── __init__.py
+│       ├── analyzer.py        # compute_report, write_report
+│       ├── config.py          # RunConfig (Pydantic)
+│       ├── dashboard.py      # Console report display
+│       ├── loader.py         # load_prompts (JSON/JSONL)
+│       ├── models.py         # RequestResult, ReportCard
+│       ├── runner.py         # Locust user, run_experiment()
+│       └── tokenizer.py      # tiktoken count_tokens
+├── prompts.jsonl             # Example prompts (for CLI or API)
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+```
 
-### Run the server
+---
 
-From the project root (where `prompts.jsonl` lives if you use `prompts_path`):
+## Running the CLI
+
+The CLI runs an interactive flow: you provide base URL, API key, model, load parameters, and either a prompts file path or prompt generation. Results and the report are written under `artifacts/`.
+
+### 1. Prepare a prompts file (optional)
+
+If you do **not** use “generate prompts via LLM”, you need a prompts file in the current directory (or path you will enter). One prompt per line (JSONL) or a JSON array:
+
+**prompts.jsonl** (one prompt per line):
+
+```
+What is 2+2?
+Summarize the concept of recursion in one sentence.
+```
+
+**prompts.json** (array):
+
+```json
+["What is 2+2?", "Summarize the concept of recursion in one sentence."]
+```
+
+### 2. Run the CLI
+
+From the project root (where `prompts.jsonl` lives, if you use a file):
+
+```bash
+flocust
+```
+
+Or:
+
+```bash
+python -m flocust.cli
+```
+
+### 3. Follow the prompts
+
+You will be asked for:
+
+| Prompt | Description | Example |
+|--------|-------------|---------|
+| Base URL | LLM API base URL (no `/chat/completions`) | `https://api.openai.com/v1` |
+| API key | Authentication key | (your key) |
+| Model name | Model identifier | `gpt-4o-mini` |
+| Max tokens per completion | Cap per response | `1024` |
+| Concurrency (users) | Number of concurrent virtual users | `10` |
+| Requests per second | Target global RPS | `5.0` |
+| Number of requests | Total requests before stopping | `100` |
+| Stream responses? | Use streaming (TTFT/inter-token) or not (latency only) | `y` / `n` |
+| Generate prompts via LLM? | If `y`, prompts are generated by one LLM call; no file needed | `y` / `n` |
+| (If not generating) Prompts file | Path to prompts file | `prompts.jsonl` |
+
+### 4. Output
+
+- **Artifacts directory** — `artifacts/<model>-users<N>-rps<R>/` containing:
+  - `result.jsonl` — One JSON object per request (latency, TTFT, tokens, etc.).
+  - `report.json` — Aggregated report (latency percentiles, TTFT, RPS, token totals).
+- **Console** — Summary and dashboard (when available).
+
+---
+
+## Running the FastAPI server
+
+The API exposes a single **run** endpoint (multipart form: upload a prompts file **or** set generate_prompts), a **report download** endpoint, and a **health** endpoint.
+
+### 1. Start the server
+
+From the project root:
+
+```bash
+uvicorn flocust.api.main:app --host 0.0.0.0 --port 8000
+```
+
+For development with auto-reload:
 
 ```bash
 uvicorn flocust.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- **GET /** — Health: returns `{"service": "flocust", "docs": "/docs", "openapi": "/openapi.json"}`.
-- **GET /docs** — Swagger UI (with hints and examples) to run and test endpoints.
-- **POST /api/experiments/run** — Run a load test with JSON body (`prompts` or `prompts_path`). Default `base_url`: `https://gateway.flotorch.cloud/openai/v1`.
-- **POST /api/experiments/run/upload** — Run a load test by uploading a prompts file (`.json` or `.jsonl`) via multipart/form-data.
-- **GET /api/experiments/result/{path}** — Download a result file by path (e.g. `artifacts/.../results.jsonl`).
+- **Base URL:** `http://localhost:8000`
+- **Interactive docs:** `http://localhost:8000/docs`
+- **OpenAPI JSON:** `http://localhost:8000/openapi.json`
 
-### Test the API
+### 2. Endpoints
 
-**1. Health check**
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check. Returns `{"status": "ok"}`. Use for load balancers and monitoring. |
+| GET | `/` | API info: service name, docs path, OpenAPI path. |
+| POST | `/api/run` | Run a load test. **Multipart form:** either upload a prompts file or set `generate_prompts=true`. Returns slim report + `report_id`. |
+| GET | `/api/report?report_id=<id>` | Download the full report (report + all results) as a JSON file. Report is removed after send; IDs expire after 1 hour. |
 
-```bash
-curl http://localhost:8000/
-```
+### 3. Run a load test (POST /api/run)
 
-**2. Run an experiment** (provide either `prompts` or `prompts_path`)
+You must provide prompts in **exactly one** of these ways:
 
-With inline prompts:
+- **Upload a prompts file** — Attach `prompts_file` (`.json` or `.jsonl`).
+- **Generate prompts** — Set `generate_prompts=true` (optionally set `generate_prompts_count`).
 
-```bash
-curl -X POST http://localhost:8000/api/experiments/run \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"base_url\": \"https://your-llm-api.com/v1\",
-    \"api_key\": \"your-api-key\",
-    \"model\": \"gpt-4o-mini\",
-    \"concurrency\": 2,
-    \"requests_per_second\": 1,
-    \"num_requests\": 5,
-    \"max_tokens\": 64,
-    \"prompts\": [\"What is 2+2?\", \"Say hello.\"]
-  }"
-```
+All other parameters are form fields.
 
-With a prompts file on the server (path relative to CWD when you started uvicorn):
+**Required form fields:** `api_key`, `model`  
+**Optional form fields (with defaults):** `base_url`, `concurrency`, `requests_per_second`, `num_requests`, `max_tokens`, `encoding`, `stream`, `generate_prompts`, `generate_prompts_count`
+
+**Example — run with prompts file upload:**
 
 ```bash
-curl -X POST http://localhost:8000/api/experiments/run \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"base_url\": \"https://your-llm-api.com/v1\",
-    \"api_key\": \"your-api-key\",
-    \"model\": \"gpt-4o-mini\",
-    \"concurrency\": 2,
-    \"requests_per_second\": 1,
-    \"num_requests\": 5,
-    \"max_tokens\": 64,
-    \"prompts_path\": \"prompts.jsonl\"
-  }"
-```
-
-**3. Run an experiment by uploading a prompts file** (multipart/form-data)
-
-Upload a `prompts.json` or `prompts.jsonl` file. All other parameters are form fields. Default base URL is `https://gateway.flotorch.cloud/openai/v1`.
-
-```bash
-curl -X POST http://localhost:8000/api/experiments/run/upload \
+curl -X POST http://localhost:8000/api/run \
   -F "prompts_file=@prompts.jsonl" \
-  -F "api_key=your-api-key" \
-  -F "model=flotorch/gemini-flash" \
+  -F "base_url=https://your-llm-api.com/v1" \
+  -F "api_key=YOUR_API_KEY" \
+  -F "model=gpt-4o-mini" \
   -F "concurrency=2" \
   -F "requests_per_second=1" \
-  -F "num_requests=5" \
-  -F "max_tokens=64"
+  -F "num_requests=10" \
+  -F "max_tokens=1024"
 ```
 
-Optional form fields: `base_url` (default: Flotorch gateway), `encoding`, `output_dir`.
+**Example — run with generated prompts (no file):**
 
-Response: `report` (ReportCard with latency, TTFT, inter-token stats), `result_file`, `result_path`, `report_path`.
+```bash
+curl -X POST http://localhost:8000/api/run \
+  -F "base_url=https://your-llm-api.com/v1" \
+  -F "api_key=YOUR_API_KEY" \
+  -F "model=gpt-4o-mini" \
+  -F "concurrency=2" \
+  -F "requests_per_second=1" \
+  -F "num_requests=10" \
+  -F "max_tokens=1024" \
+  -F "generate_prompts=true"
+```
 
-## Result and report format
+**Response:** JSON with a slim `report` (aggregate metrics) and a `report_id`. The full report (report + per-request results) is written asynchronously; download it with GET `/api/report`.
 
-**result.jsonl** (one line per request):
+### 4. Download the full report
+
+Use the `report_id` from the POST `/api/run` response:
+
+```bash
+curl -O -J "http://localhost:8000/api/report?report_id=YOUR_REPORT_ID"
+```
+
+Or open the URL in a browser to download the JSON file. The file is deleted after it is served; report IDs expire after 1 hour.
+
+### 5. Health check
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response: `{"status": "ok"}`.
+
+---
+
+## Output formats
+
+### result.jsonl
+
+One JSON object per line, one line per request. Example:
 
 ```json
 {"req_id":"abc123_1","input_prompt":"What is 2+2?","output_result":"4","latency_ms":450.2,"ttft_ms":120.1,"input_tokens":8,"output_tokens":2,"success":true,"error":null}
 ```
 
-**report.json** (report card):
+### report.json (report card)
+
+Aggregated metrics for the run. Example:
 
 ```json
 {
-  "experiment_id": "experiment",
+  "experiment_id": "model-users10-rps5",
   "total_requests": 100,
   "successful_requests": 98,
   "failed_requests": 2,
@@ -163,7 +264,6 @@ Response: `report` (ReportCard with latency, TTFT, inter-token stats), `result_f
   "latency_p99_ms": 890.0,
   "ttft_available": true,
   "average_ttft_ms": 110.2,
-  "ttft_p90_ms": 180.0,
   "total_input_tokens": 1200,
   "total_output_tokens": 450,
   "total_tokens": 1650,
@@ -173,11 +273,17 @@ Response: `report` (ReportCard with latency, TTFT, inter-token stats), `result_f
 }
 ```
 
+When `stream=false`, TTFT and inter-token fields are omitted or null; only end-to-end latency is reported.
+
+---
+
 ## Requirements
 
 - Python 3.10+
-- OpenAI-compatible chat completions endpoint (e.g. OpenAI, Azure OpenAI, local models with same API).
-- For TTFT, the API must support `stream: true` and return SSE or JSON chunks.
+- OpenAI-compatible chat completions endpoint
+- For TTFT and inter-token metrics: API must support `stream: true` and return SSE or JSON stream chunks
+
+---
 
 ## License
 
