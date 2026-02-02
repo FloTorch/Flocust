@@ -56,7 +56,7 @@ def display_dashboard(report: ReportCard, results: list[RequestResult]) -> None:
     """Display a single-table dashboard (Flotorch LLM Benchmarking | LLM Metrics Summary style)."""
     try:
         tw = shutil.get_terminal_size().columns
-    except Exception:
+    except (OSError, AttributeError):
         tw = 100
 
     metric_w = 32

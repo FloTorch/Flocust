@@ -1,9 +1,8 @@
 """
-API routes: one run endpoint (upload file or generate prompts), download report, health.
+API routes: run load test, download report.
 
-- POST /api/run — multipart: optional prompts_file OR generate_prompts=true.
-- GET /api/report?report_id=... — download full report JSON.
-- GET /health — health check.
+POST /api/run — multipart: prompts_file (upload) OR generate_prompts=true.
+GET /api/report?report_id=... — download full report JSON.
 """
 
 import json
@@ -43,14 +42,18 @@ def _build_config(
     requests_per_second: float,
     num_requests: int,
     max_tokens: int,
+    timeout_sec: int,
+    duration_sec: float,
+    ramp_up_sec: float,
+    use_rps_throttle: bool,
     prompts_path: Path | None,
     output_dir: Path,
-    encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = "cl100k_base",
-    stream: bool = True,
-    generate_prompts: bool = False,
-    generate_prompts_count: int | None = None,
+    encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"],
+    stream: bool,
+    generate_prompts: bool,
+    generate_prompts_count: int | None,
 ) -> RunConfig:
-    """Build RunConfig from common parameters."""
+    """Build RunConfig from API form parameters."""
     return RunConfig(
         base_url=base_url,
         api_key=api_key,
@@ -59,6 +62,10 @@ def _build_config(
         requests_per_second=requests_per_second,
         num_requests=num_requests,
         max_tokens=max_tokens,
+        timeout_sec=timeout_sec,
+        duration_sec=duration_sec,
+        ramp_up_sec=ramp_up_sec,
+        use_rps_throttle=use_rps_throttle,
         prompts_path=prompts_path,
         output_dir=output_dir,
         encoding=encoding,
@@ -68,20 +75,24 @@ def _build_config(
     )
 
 
-def _write_full_report_async(report_id: str, report: ReportCard, results: list[RequestResult]) -> None:
-    """
-    Background task: write full report (report + results) to a temp file and register path.
-    Runs outside request context; do not raise.
-    """
+def _write_full_report_async(
+    report_id: str,
+    report: ReportCard,
+    results: list[RequestResult],
+) -> None:
+    """Write full report to temp file and register path. Runs in background."""
     try:
         fd, path = tempfile.mkstemp(suffix=".json", prefix="flocust_report_")
         try:
             with open(fd, "w", encoding="utf-8") as f:
-                payload = {
-                    "report": report.model_dump(mode="json"),
-                    "results": [r.model_dump(mode="json") for r in results],
-                }
-                json.dump(payload, f, indent=2)
+                json.dump(
+                    {
+                        "report": report.model_dump(mode="json"),
+                        "results": [r.model_dump(mode="json") for r in results],
+                    },
+                    f,
+                    indent=2,
+                )
             register(report_id, Path(path))
         except Exception:
             try:
@@ -93,7 +104,7 @@ def _write_full_report_async(report_id: str, report: ReportCard, results: list[R
 
 
 def _cleanup_report_after_send(report_id: str) -> None:
-    """Background task: remove report from registry and delete temp file."""
+    """Remove report from registry and delete temp file."""
     from .report_registry import pop_path
 
     path = pop_path(report_id)
@@ -109,10 +120,7 @@ def _run_and_prepare_response(
     experiment_id: str,
     background_tasks: BackgroundTasks,
 ) -> RunExperimentResponse:
-    """
-    Run experiment in temp dir, compute report, schedule async full-report write,
-    return slim report + report_id. Caller must delete temp dir.
-    """
+    """Run experiment, compute report, schedule full-report write, return summary + report_id."""
     results, result_path, out_dir, duration_seconds = run_experiment(config)
     report = compute_report(
         results,
@@ -122,55 +130,55 @@ def _run_and_prepare_response(
     )
     report_id = uuid.uuid4().hex
     background_tasks.add_task(_write_full_report_async, report_id, report, results)
-    summary = report_to_summary(report)
-    return RunExperimentResponse(report=summary, report_id=report_id)
+    return RunExperimentResponse(
+        report=report_to_summary(report),
+        report_id=report_id,
+    )
 
 
 @router.post(
     "/run",
     response_model=RunExperimentResponse,
     summary="Run load test",
-    response_description="Slim report + report_id. Use GET /api/report?report_id=... to download full report.",
+    response_description="Report summary + report_id. Use GET /api/report?report_id=... for full report.",
 )
 async def run_experiment_endpoint(
     background_tasks: BackgroundTasks,
-    prompts_file: UploadFile | None = File(
-        default=None,
-        description="Prompts file (.json or .jsonl). Provide this OR set generate_prompts=true.",
-    ),
-    base_url: str = Form(default=DEFAULT_BASE_URL),
-    api_key: str = Form(...),
-    model: str = Form(...),
-    concurrency: int = Form(default=10, ge=1, le=10_000),
-    requests_per_second: float = Form(default=5.0, ge=0.1, le=10_000.0),
-    num_requests: int = Form(default=100, ge=1, le=1_000_000),
-    max_tokens: int = Form(default=1024, ge=1, le=128_000),
-    encoding: str = Form(default="cl100k_base"),
-    stream: bool = Form(default=True, description="Stream responses; if False, only latency is measured."),
-    generate_prompts: bool = Form(
-        default=False,
-        description="Generate prompts via LLM (use when not uploading a file).",
-    ),
-    generate_prompts_count: int | None = Form(
-        default=None,
-        description="Number of prompts to generate (default ~15%% of num_requests).",
-    ),
+    prompts_file: UploadFile | None = File(default=None, description="Prompts file (.json or .jsonl)"),
+    base_url: str = Form(default=DEFAULT_BASE_URL, description="LLM API base URL"),
+    api_key: str = Form(..., description="API key"),
+    model: str = Form(..., description="Model name"),
+    concurrency: int = Form(10, ge=1, le=10_000, description="Concurrent users"),
+    requests_per_second: float = Form(5.0, ge=0.1, le=10_000.0, description="Target RPS (when use_rps_throttle)"),
+    num_requests: int = Form(100, ge=1, le=1_000_000, description="Total requests"),
+    duration_sec: float = Form(0, ge=0, description="Run duration in seconds (overrides num_requests when > 0)"),
+    ramp_up_sec: float = Form(0, ge=0, description="Stagger worker start (seconds)"),
+    use_rps_throttle: bool = Form(False, description="Throttle to RPS (false = max throughput)"),
+    timeout_sec: int = Form(60, ge=1, le=300, description="Per-request timeout (seconds)"),
+    max_tokens: int = Form(1024, ge=1, le=128_000, description="Max completion tokens"),
+    encoding: str = Form("cl100k_base", description="Tiktoken encoding"),
+    stream: bool = Form(True, description="Stream for TTFT/inter-token metrics"),
+    generate_prompts: bool = Form(False, description="Generate prompts via LLM"),
+    generate_prompts_count: int | None = Form(None, description="Number of prompts to generate"),
 ) -> RunExperimentResponse:
     """
     Run an LLM load test.
 
-    **Provide prompts in exactly one way:**
-    - **Upload a file**: attach `prompts_file` (.json or .jsonl).
-    - **Generate prompts**: set `generate_prompts=true` (optionally set `generate_prompts_count`).
+    Provide prompts in one way:
+    - Upload a file: attach `prompts_file` (.json or .jsonl).
+    - Or set `generate_prompts=true` (optionally `generate_prompts_count`).
 
-    **Response:** `{ "report": { ... }, "report_id": "..." }`. Full report (report + results) is written
-    asynchronously; use **GET /api/report?report_id={report_id}** to download the JSON file.
+    duration_sec > 0: run for N seconds; else run until num_requests.
+    use_rps_throttle=true: throttle to requests_per_second; false: max throughput.
+
+    Returns report summary and report_id. Full report (report + results) is written
+    asynchronously; use GET /api/report?report_id={report_id} to download.
     """
     has_file = prompts_file is not None and (prompts_file.filename or "").strip() != ""
     if has_file and generate_prompts:
         raise HTTPException(
             status_code=400,
-            detail="Provide either prompts_file (upload) or generate_prompts=true, not both.",
+            detail="Provide either prompts_file or generate_prompts=true, not both.",
         )
     if not has_file and not generate_prompts:
         raise HTTPException(
@@ -181,7 +189,8 @@ async def run_experiment_endpoint(
     run_id = uuid.uuid4().hex[:8]
     temp_dir = Path(tempfile.mkdtemp(prefix="flocust_"))
     encoding_lit: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = (
-        encoding if encoding in ("cl100k_base", "o200k_base", "p50k_base", "r50k_base") else "cl100k_base"
+        encoding if encoding in ("cl100k_base", "o200k_base", "p50k_base", "r50k_base")
+        else "cl100k_base"
     )
     try:
         if has_file and prompts_file:
@@ -194,7 +203,9 @@ async def run_experiment_endpoint(
             content = await prompts_file.read()
             if not content or not content.strip():
                 raise HTTPException(status_code=400, detail="Prompts file is empty.")
-            prompts_path = temp_dir / (PROMPTS_FILENAME if suffix == ".jsonl" else "prompts.json")
+            prompts_path = temp_dir / (
+                PROMPTS_FILENAME if suffix == ".jsonl" else "prompts.json"
+            )
             prompts_path.write_bytes(content)
             config = _build_config(
                 base_url=base_url,
@@ -204,6 +215,10 @@ async def run_experiment_endpoint(
                 requests_per_second=requests_per_second,
                 num_requests=num_requests,
                 max_tokens=max_tokens,
+                timeout_sec=timeout_sec,
+                duration_sec=duration_sec,
+                ramp_up_sec=ramp_up_sec,
+                use_rps_throttle=use_rps_throttle,
                 prompts_path=prompts_path,
                 output_dir=temp_dir,
                 encoding=encoding_lit,
@@ -212,6 +227,10 @@ async def run_experiment_endpoint(
                 generate_prompts_count=None,
             )
         else:
+            # When generate_prompts=True, count must be None or 1–1000 (RunConfig rejects 0)
+            count = generate_prompts_count
+            if count is None or count < 1:
+                count = max(1, min(1000, num_requests // 10))
             config = _build_config(
                 base_url=base_url,
                 api_key=api_key,
@@ -220,12 +239,16 @@ async def run_experiment_endpoint(
                 requests_per_second=requests_per_second,
                 num_requests=num_requests,
                 max_tokens=max_tokens,
+                timeout_sec=timeout_sec,
+                duration_sec=duration_sec,
+                ramp_up_sec=ramp_up_sec,
+                use_rps_throttle=use_rps_throttle,
                 prompts_path=None,
                 output_dir=temp_dir,
                 encoding=encoding_lit,
                 stream=stream,
                 generate_prompts=True,
-                generate_prompts_count=generate_prompts_count,
+                generate_prompts_count=count,
             )
         return _run_and_prepare_response(config, run_id, background_tasks)
     finally:
@@ -235,23 +258,18 @@ async def run_experiment_endpoint(
 @router.get(
     "/report",
     summary="Download full report",
-    response_description="JSON file with report + results. File is removed after send.",
+    response_description="JSON file with report + results. Removed after send.",
 )
 def get_report(
     report_id: str,
     background_tasks: BackgroundTasks,
 ) -> FileResponse:
-    """
-    Download the full report (report + results) as a JSON file.
-
-    Use the **report_id** returned from POST /api/run. Reports expire after 1 hour.
-    The file is deleted after the response is sent.
-    """
+    """Download full report (report + results) as JSON. Use report_id from POST /api/run."""
     path = get_path(report_id)
     if path is None or not path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Report not found or expired. Run an experiment first and use the returned report_id within 1 hour.",
+            detail="Report not found or expired. Run an experiment and use report_id within 1 hour.",
         )
     background_tasks.add_task(_cleanup_report_after_send, report_id)
     return FileResponse(

@@ -1,8 +1,4 @@
-"""
-Locust-based LLM load test runner.
-
-Uses programmatic Locust API for accurate metrics and comprehensive load testing.
-"""
+"""Locust-based LLM load test runner with isolated state management."""
 
 import json
 import random
@@ -12,11 +8,13 @@ import tempfile
 import threading
 import time
 import uuid
+from io import StringIO
 from pathlib import Path
+from typing import Optional
 
 import gevent
 import httpx
-from locust import HttpUser, constant_throughput, task, events
+from locust import HttpUser, constant, constant_throughput, events, task
 from locust.env import Environment
 from locust.log import setup_logging
 
@@ -36,81 +34,129 @@ FLUSH_EVERY_LINES = 10
 QUEUE_POLL_TIMEOUT = 0.1
 STOP_POLL_INTERVAL = 0.2
 
-_results: list[RequestResult] = []
-_results_lock = threading.Lock()
-_file_write_queue = gevent.queue.Queue()
-_file_writer_greenlet = None
-_result_file_handle = None
-
-# Progress tracking
-_progress_current = 0
-_progress_total = 0
-_progress_start_time = 0.0
-
-# Input token cache (prompt -> count) to avoid repeated tiktoken calls; cleared each run
+# Input token cache (global cache is acceptable as it's just optimization)
 _input_token_cache: dict[str, int] = {}
 _INPUT_TOKEN_CACHE_MAX = 256
+_cache_lock = threading.Lock()
+
+
+class RequestLimiter:
+    """Strict limit: allow exactly N requests (no overshoot)."""
+
+    def __init__(self):
+        self._limit = 0
+        self._remaining = 0
+        self._lock = threading.Lock()
+
+    def reset(self, limit: int) -> None:
+        with self._lock:
+            self._limit = max(0, limit)
+            self._remaining = self._limit
+
+    def can_make_request(self) -> bool:
+        """Allow request only if remaining > 0; then decrement. Exactly N allowed."""
+        with self._lock:
+            if self._remaining <= 0:
+                return False
+            self._remaining -= 1
+            return True
+
+    @property
+    def current_count(self) -> int:
+        """Number of requests granted so far."""
+        with self._lock:
+            return self._limit - self._remaining
+
+
+class LoadTestRunner:
+    """Isolated load test execution with all state encapsulated."""
+
+    def __init__(self):
+        self.results: list[RequestResult] = []
+        self.results_lock = threading.Lock()
+        self.file_write_queue = gevent.queue.Queue()
+        self.file_writer_greenlet: Optional[gevent.Greenlet] = None
+        self.result_file_handle: Optional[sys.stdout] = None
+
+        # Progress tracking (single bar, updated in place only)
+        self.progress_current = 0
+        self.progress_total = 0
+        self.progress_start_time = 0.0
+        self._progress_stop = False
+        self.progress_greenlet: Optional[gevent.Greenlet] = None
+
+        # Request limiting
+        self.request_limiter = RequestLimiter()
+
+        # Test configuration
+        self.config: Optional[RunConfig] = None
+        self.output_dir: Optional[Path] = None
+        self.result_path: Optional[Path] = None
+
 
 
 def _cached_input_tokens(prompt: str, encoding: str) -> int:
-    """Return input token count, using cache for repeated prompts."""
-    if prompt in _input_token_cache:
-        return _input_token_cache[prompt]
-    n = count_tokens(prompt, encoding)
-    if len(_input_token_cache) >= _INPUT_TOKEN_CACHE_MAX:
-        _input_token_cache.clear()
-    _input_token_cache[prompt] = n
-    return n
+    """Return input token count, using global cache for repeated prompts."""
+    with _cache_lock:
+        if prompt in _input_token_cache:
+            return _input_token_cache[prompt]
+        n = count_tokens(prompt, encoding)
+        if len(_input_token_cache) >= _INPUT_TOKEN_CACHE_MAX:
+            _input_token_cache.clear()
+        _input_token_cache[prompt] = n
+        return n
 
 
-def _show_progress():
-    """Display progress bar during test execution."""
-    if _progress_total == 0:
+_PROGRESS_LINE_WIDTH = 80
+_ANSI_CLEAR_LINE = "\033[2K\r"
+
+
+def _show_progress(runner: LoadTestRunner):
+    """Single line, update in place (no newline)."""
+    out = getattr(runner, "_real_stdout", None)
+    if not out:
         return
-
-    elapsed = time.time() - _progress_start_time
-    progress = min(_progress_current / _progress_total, 1.0)
-    bar_width = 40
-    filled = int(bar_width * progress)
-    bar = "=" * filled + "-" * (bar_width - filled)
-
-    rps = _progress_current / elapsed if elapsed > 0 else 0
-    msg = (
-        f"\rProgress: [{bar}] {_progress_current}/{_progress_total} "
-        f"requests ({progress:.1%}) | {rps:.1f} RPS"
-    )
-    sys.stdout.write(msg)
-    sys.stdout.flush()
-
-
-def _update_progress():
-    """Update progress bar in a loop."""
-    while True:
-        _show_progress()
-        gevent.sleep(0.5)
+    elapsed = time.time() - runner.progress_start_time
+    rps = runner.progress_current / elapsed if elapsed > 0 else 0
+    if runner.progress_total > 0:
+        pct = min(runner.progress_current / runner.progress_total, 1.0)
+        w = 30
+        filled = int(w * pct)
+        bar = "=" * filled + "-" * (w - filled)
+        msg = f"[{bar}] {runner.progress_current}/{runner.progress_total} ({pct:.0%}) {rps:.1f} RPS"
+    else:
+        msg = f"{runner.progress_current} req | {elapsed:.1f}s | {rps:.1f} RPS"
+    line = (msg + " " * _PROGRESS_LINE_WIDTH)[:_PROGRESS_LINE_WIDTH]
+    out.write(_ANSI_CLEAR_LINE + line)
+    out.flush()
 
 
-def _start_progress(total_requests: int):
-    """Start progress tracking."""
-    global _progress_current, _progress_total, _progress_start_time
-    _progress_current = 0
-    _progress_total = total_requests
-    _progress_start_time = time.time()
+def _update_progress(runner: LoadTestRunner):
+    last = -1
+    while not getattr(runner, "_progress_stop", False):
+        if runner.progress_current != last:
+            last = runner.progress_current
+            _show_progress(runner)
+        gevent.sleep(0.25)
 
-    gevent.spawn(_update_progress)
+
+def _start_progress(runner: LoadTestRunner, total_requests: int):
+    runner.progress_current = 0
+    runner.progress_total = total_requests
+    runner.progress_start_time = time.time()
+    runner._progress_stop = False
+    runner.progress_greenlet = gevent.spawn(_update_progress, runner)
 
 
-def _increment_progress():
-    """Increment progress counter."""
-    global _progress_current
-    _progress_current += 1
+def _stop_progress(runner: LoadTestRunner):
+    runner._progress_stop = True
+    if runner.progress_greenlet:
+        runner.progress_greenlet.join(timeout=1.0)
+        runner.progress_greenlet = None
 
 
 def _generate_prompts_via_llm(config: RunConfig, count: int) -> list[str]:
-    """
-    Call the LLM once (non-streaming) to generate `count` short prompts.
-    Returns list of prompt strings (one per line from response).
-    """
+    """Call the LLM once (non-streaming) to generate count short prompts."""
     url = f"{config.base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": config.model,
@@ -160,7 +206,6 @@ class LLMUser(HttpUser):
             environment._prompts_loaded = load_prompts(path)
             if not environment._prompts_loaded:
                 raise ValueError(f"No prompts loaded from {path}")
-        self.prompts = environment._prompts_loaded
 
     def on_start(self):
         """Set up authentication headers."""
@@ -178,6 +223,9 @@ class LLMUser(HttpUser):
     @task
     def chat_completion(self):
         """Make a chat completion request (stream or non-stream)."""
+        # Check if we've reached the request limit
+        if not LLMUser.test_runner_instance.request_limiter.can_make_request():
+            return
         req_id, prompt = self._next_prompt()
         stream = self.environment.parsed_options.stream
         payload = {
@@ -307,10 +355,10 @@ class LLMUser(HttpUser):
         )
         result.inter_token_latencies = inter_token_latencies
 
-        _file_write_queue.put(result)
-        with _results_lock:
-            _results.append(result)
-        _increment_progress()
+        LLMUser.test_runner_instance.file_write_queue.put(result)
+        with LLMUser.test_runner_instance.results_lock:
+            LLMUser.test_runner_instance.results.append(result)
+        LLMUser.test_runner_instance.progress_current += 1
 
     def _parse_one_sse_line(self, data_str: str) -> str:
         """Parse one SSE payload (after 'data: ') and return content from choices[0].delta.content."""
@@ -329,17 +377,21 @@ class LLMUser(HttpUser):
         except (json.JSONDecodeError, TypeError, KeyError):
             return ""
 
+    @property
+    def prompts(self):
+        """Get prompts from environment."""
+        return self.environment._prompts_loaded
 
-def _async_file_writer():
+
+def _async_file_writer(runner: LoadTestRunner):
     """Background greenlet that writes results to file asynchronously."""
-    global _result_file_handle
     lines_since_flush = 0
     while True:
         try:
-            result = _file_write_queue.get(timeout=QUEUE_POLL_TIMEOUT)
+            result = runner.file_write_queue.get(timeout=QUEUE_POLL_TIMEOUT)
             if result is None:
                 break
-            if _result_file_handle:
+            if runner.result_file_handle:
                 # Fill per-request inter-token stats here (off hot path)
                 if result.inter_token_latencies:
                     sorted_itt = sorted(result.inter_token_latencies)
@@ -349,10 +401,10 @@ def _async_file_writer():
                     result.p50_inter_token_latency = round(percentile(sorted_itt, 50), 4)
                     result.p90_inter_token_latency = round(percentile(sorted_itt, 90), 4)
                     result.p95_inter_token_latency = round(percentile(sorted_itt, 95), 4)
-                _result_file_handle.write(result.model_dump_json() + "\n")
+                runner.result_file_handle.write(result.model_dump_json() + "\n")
                 lines_since_flush += 1
                 if lines_since_flush >= FLUSH_EVERY_LINES:
-                    _result_file_handle.flush()
+                    runner.result_file_handle.flush()
                     lines_since_flush = 0
         except gevent.queue.Empty:
             continue
@@ -360,25 +412,25 @@ def _async_file_writer():
             continue
 
 
-def _start_async_writer(result_path: Path):
+def _start_async_writer(runner: LoadTestRunner, result_path: Path):
     """Start the async file writer greenlet."""
-    global _file_writer_greenlet, _result_file_handle
-    _result_file_handle = open(
+    runner.result_file_handle = open(
         result_path, "w", encoding="utf-8", buffering=65536
     )
-    _file_writer_greenlet = gevent.spawn(_async_file_writer)
+    runner.file_writer_greenlet = gevent.spawn(_async_file_writer, runner)
 
 
-def _stop_async_writer():
+def _stop_async_writer(runner: LoadTestRunner):
     """Stop the async file writer and close file handle."""
-    global _file_writer_greenlet, _result_file_handle
-    if _file_writer_greenlet:
-        _file_write_queue.put(None)
-        _file_writer_greenlet.join(timeout=2.0)
-    if _result_file_handle:
-        _result_file_handle.flush()
-        _result_file_handle.close()
-        _result_file_handle = None
+    if runner.file_writer_greenlet:
+        runner.file_write_queue.put(None)
+        runner.file_writer_greenlet.join(timeout=2.0)
+    if runner.result_file_handle:
+        runner.result_file_handle.flush()
+        runner.result_file_handle.close()
+        runner.result_file_handle = None
+
+    # Logging was disabled at environment level, no need to restore
 
 
 def _on_request(request_type, name, response_time, response_length, exception, **kwargs):
@@ -387,15 +439,14 @@ def _on_request(request_type, name, response_time, response_length, exception, *
 
 def _run_experiment_programmatic(
     config: RunConfig,
-) -> tuple[list[RequestResult], float]:
+    test_runner: LoadTestRunner,
+) -> float:
     """Run load test using programmatic Locust API."""
-    global _results, _input_token_cache
-    with _results_lock:
-        _results.clear()
-    _input_token_cache.clear()
+    test_runner.config = config
+    test_runner.request_limiter.reset(config.num_requests)
 
-    setup_logging("INFO", None)
-
+    # Suppress Locust logging so only our single progress bar is visible
+    setup_logging(loglevel="CRITICAL")
     env = Environment(user_classes=[LLMUser])
 
     env.parsed_options = type("Options", (), {
@@ -408,33 +459,49 @@ def _run_experiment_programmatic(
         "stream": config.stream,
     })()
 
+    # Pass test runner instance to users
+    LLMUser.test_runner_instance = test_runner
+
     env.host = config.base_url.rstrip("/")
 
-    # Throttle to target RPS (global throughput)
-    LLMUser.wait_time = constant_throughput(config.requests_per_second)
+    if getattr(config, "use_rps_throttle", False):
+        LLMUser.wait_time = constant_throughput(config.requests_per_second)
+    else:
+        LLMUser.wait_time = constant(0)
 
     events.request.add_listener(_on_request)
 
     runner = env.create_local_runner()
 
-    spawn_rate = min(config.concurrency, 10)
+    # Ramp-up: stagger spawn over ramp_up_sec when set
+    if getattr(config, "ramp_up_sec", 0) and config.ramp_up_sec > 0:
+        spawn_rate = max(1, int(config.concurrency / config.ramp_up_sec))
+    else:
+        spawn_rate = config.concurrency
     runner.start(config.concurrency, spawn_rate=spawn_rate)
 
     start_time = time.perf_counter()
+    use_duration = getattr(config, "duration_sec", 0) and config.duration_sec > 0
     num_requests = config.num_requests
+    duration_sec = getattr(config, "duration_sec", 0) or 0
     while True:
         gevent.sleep(STOP_POLL_INTERVAL)
-        with _results_lock:
-            n = len(_results)
-        if n >= num_requests:
-            break
+        elapsed = time.perf_counter() - start_time
+        if use_duration:
+            if elapsed >= duration_sec:
+                break
+        else:
+            # Stop as soon as we have exactly num_requests completed (strict, no overshoot)
+            with test_runner.results_lock:
+                n_done = len(test_runner.results)
+            if n_done >= num_requests:
+                break
     runner.stop()
     runner.quit()
     end_time = time.perf_counter()
     duration_seconds = end_time - start_time
 
-    with _results_lock:
-        return list(_results), duration_seconds
+    return duration_seconds
 
 
 def run_experiment(
@@ -446,6 +513,9 @@ def run_experiment(
     When generate_prompts=True, generates prompts via one LLM call first.
     Writes result.jsonl and returns (results, result_path, output_dir, duration_seconds).
     """
+    # Create isolated runner instance
+    runner = LoadTestRunner()
+
     generated_prompts_temp_dir: Path | None = None
     if config.generate_prompts:
         count = config.generate_prompts_count
@@ -469,19 +539,36 @@ def run_experiment(
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / RESULTS_FILENAME
 
-    _start_progress(config.num_requests)
-    _start_async_writer(result_path)
+    # Redirect stdout/stderr so only progress line is visible
+    real_stdout = sys.stdout
+    real_stderr = sys.stderr
+    runner._real_stdout = real_stdout
+    sys.stdout = StringIO()
+    sys.stderr = StringIO()
+
+    total_for_progress = (
+        0 if (getattr(config, "duration_sec", 0) and config.duration_sec > 0)
+        else config.num_requests
+    )
+    _start_progress(runner, total_for_progress)
+    _start_async_writer(runner, result_path)
 
     try:
-        results, duration_seconds = _run_experiment_programmatic(config)
+        duration_seconds = _run_experiment_programmatic(config, runner)
     finally:
-        _stop_async_writer()
-        _show_progress()
-        print()
+        _stop_progress(runner)
+        _stop_async_writer(runner)
+        sys.stdout = real_stdout
+        sys.stderr = real_stderr
+        real_stdout.write(_ANSI_CLEAR_LINE + " " * _PROGRESS_LINE_WIDTH + "\n")
+        real_stdout.flush()
         if generated_prompts_temp_dir is not None and generated_prompts_temp_dir.exists():
             try:
                 shutil.rmtree(generated_prompts_temp_dir, ignore_errors=True)
             except OSError:
                 pass
 
+    # Strict: return exactly num_requests results
+    with runner.results_lock:
+        results = runner.results[: config.num_requests]
     return results, result_path, out_dir, duration_seconds

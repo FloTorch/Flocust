@@ -1,12 +1,16 @@
 """Shared code for Flocust: config, models, loader, tokenizer, analyzer, dashboard, runner."""
 
-from flocust.common.config import RunConfig, artifact_output_dir, load_config_from_file
-from flocust.common.models import ReportCard, RequestResult
-from flocust.common.loader import load_prompts
-from flocust.common.tokenizer import count_tokens
 from flocust.common.analyzer import compute_report, write_report
+from flocust.common.config import (
+    RunConfig,
+    artifact_output_dir,
+    load_config_from_file,
+)
 from flocust.common.dashboard import display_dashboard
+from flocust.common.loader import load_prompts
+from flocust.common.models import ReportCard, RequestResult
 from flocust.common.runner import run_experiment
+from flocust.common.tokenizer import count_tokens
 
 __all__ = [
     "RunConfig",
