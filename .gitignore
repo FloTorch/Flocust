@@ -1,0 +1,41 @@
+# Virtual env and caches
+venv/
+.venv/
+env/
+_flocust_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build / install
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+
+# Generated / redundant output
+artifacts/
+experiments/
+result.jsonl
+results.jsonl
+
+# Backup / copy folders
+flocust copy/
+* copy/
+*.bak
+*~
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Env and secrets
+.env
+.env.*
+!.env.example
