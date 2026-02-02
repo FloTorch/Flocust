@@ -1,17 +1,17 @@
 """
-CLI for Flocust: interactive prompts for inputs, run load test, output to artifacts/.
+CLI for Flocust: load config from config.json or interactive prompts, run load test.
 
-Prompts for: base_url, api_key, model, max_tokens, concurrency, RPS, num_requests.
-Runs at target RPS until num_requests are completed (no duration).
+When config.json exists (or --config path given), reads all settings from it.
+Otherwise prompts for: base_url, api_key, model, max_tokens, concurrency, RPS, num_requests.
 """
 
 import sys
 from pathlib import Path
 
-__all__ = ["main", "collect_config_from_cli"]
+__all__ = ["main", "collect_config", "collect_config_from_cli"]
 
 from flocust.common.analyzer import compute_report, write_report
-from flocust.common.config import RunConfig, artifact_output_dir
+from flocust.common.config import RunConfig, artifact_output_dir, load_config_from_file, normalize_base_url
 from flocust.common.dashboard import display_dashboard
 from flocust.common.runner import run_experiment
 
@@ -64,29 +64,32 @@ def _prompt_bool(text: str, default: bool = True) -> bool:
     return raw in ("y", "yes", "1", "true")
 
 
-def _normalize_base_url(url: str) -> str:
-    url = (url or "").strip().rstrip("/")
-    if not url:
-        return url
-    lower = url.lower()
-    if lower.startswith("htttps://"):
-        url = "https://" + url[9:]
-    elif lower.startswith("htttp://"):
-        url = "http://" + url[8:]
-    elif lower.startswith("htps://"):
-        url = "https://" + url[7:]
-    elif not (lower.startswith("http://") or lower.startswith("https://")):
-        if "://" not in url:
-            url = "https://" + url
-    return url
-
-
 def _prompt_base_url(text: str, default: str | None = None) -> str:
     raw = _prompt(text, default)
-    normalized = _normalize_base_url(raw)
+    normalized = normalize_base_url(raw)
     if normalized and normalized != raw:
         print(f"  -> Using base URL: {normalized}")
     return normalized or raw
+
+
+DEFAULT_CONFIG_PATH = Path("config.json")
+
+
+def collect_config(config_path: Path | None = None) -> RunConfig:
+    """
+    Load config from file or interactively.
+
+    - If config_path is given and exists, load from it.
+    - Elif config_path is given but missing, raise FileNotFoundError.
+    - Elif config.json exists in cwd, load from it.
+    - Else collect interactively from terminal.
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+    if path and path.exists():
+        return load_config_from_file(path)
+    if config_path is not None:
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    return collect_config_from_cli()
 
 
 def collect_config_from_cli() -> RunConfig:
@@ -147,8 +150,18 @@ def collect_config_from_cli() -> RunConfig:
 
 
 def main() -> None:
-    """Entry point: collect config, run experiment until num_requests done, write to artifacts/."""
-    config = collect_config_from_cli()
+    """Entry point: load config from config.json or interactively, run experiment, write to artifacts/."""
+    config_path: Path | None = None
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a in ("-c", "--config") and i + 1 < len(args):
+            config_path = Path(args[i + 1])
+            break
+        if a.startswith("--config="):
+            config_path = Path(a.split("=", 1)[1])
+            break
+
+    config = collect_config(config_path)
     print("\nRunning load test...")
     results, result_path, out_dir, duration_seconds = run_experiment(config)
     print(f"Requests completed: {len(results)}")

@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from typing import Iterator
 
 # Keys to try when extracting prompt text from a JSON object.
 PROMPT_KEYS = ("prompt", "text", "content", "input", "message")
@@ -76,14 +75,3 @@ def _extract_prompt(item: str | dict) -> str:
             if isinstance(v, str):
                 return v
     raise ValueError(f"Cannot extract prompt from: {type(item).__name__}")
-
-
-def prompt_iterator(path: Path) -> Iterator[str]:
-    """Yield prompts one by one (for round-robin in load test)."""
-    prompts = load_prompts(path)
-    if not prompts:
-        raise ValueError("No prompts found in file")
-    idx = 0
-    while True:
-        yield prompts[idx % len(prompts)]
-        idx += 1

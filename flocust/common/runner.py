@@ -24,6 +24,7 @@ from flocust.common.config import RunConfig
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
 from flocust.common.tokenizer import count_tokens
+from flocust.common.utils import percentile
 
 # Default count for LLM-generated prompts (10–20% of num_requests).
 GENERATE_PROMPTS_DEFAULT_PERCENT = 0.15
@@ -49,16 +50,6 @@ _progress_start_time = 0.0
 # Input token cache (prompt -> count) to avoid repeated tiktoken calls; cleared each run
 _input_token_cache: dict[str, int] = {}
 _INPUT_TOKEN_CACHE_MAX = 256
-
-
-def _percentile(sorted_values: list[float], p: float) -> float:
-    """Return p-th percentile (0-100). Used in file writer only."""
-    if not sorted_values:
-        return 0.0
-    k = (len(sorted_values) - 1) * (p / 100)
-    f = int(k)
-    c = 1 if f < len(sorted_values) - 1 else 0
-    return sorted_values[f] * (1 - (k - f)) + sorted_values[f + c] * (k - f)
 
 
 def _cached_input_tokens(prompt: str, encoding: str) -> int:
@@ -355,9 +346,9 @@ def _async_file_writer():
                     result.avg_inter_token_latency = round(
                         sum(result.inter_token_latencies) / len(result.inter_token_latencies), 4
                     )
-                    result.p50_inter_token_latency = round(_percentile(sorted_itt, 50), 4)
-                    result.p90_inter_token_latency = round(_percentile(sorted_itt, 90), 4)
-                    result.p95_inter_token_latency = round(_percentile(sorted_itt, 95), 4)
+                    result.p50_inter_token_latency = round(percentile(sorted_itt, 50), 4)
+                    result.p90_inter_token_latency = round(percentile(sorted_itt, 90), 4)
+                    result.p95_inter_token_latency = round(percentile(sorted_itt, 95), 4)
                 _result_file_handle.write(result.model_dump_json() + "\n")
                 lines_since_flush += 1
                 if lines_since_flush >= FLUSH_EVERY_LINES:
@@ -391,8 +382,7 @@ def _stop_async_writer():
 
 
 def _on_request(request_type, name, response_time, response_length, exception, **kwargs):
-    """Handle all requests."""
-    pass
+    """Locust request event listener (no-op; required for event registration)."""
 
 
 def _run_experiment_programmatic(
@@ -414,7 +404,7 @@ def _run_experiment_programmatic(
         "max_tokens": config.max_tokens,
         "prompts_path": str(config.prompts_path),
         "encoding": config.encoding,
-        "timeout": (10, 30),
+        "timeout": config.timeout_sec,
         "stream": config.stream,
     })()
 

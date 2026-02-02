@@ -3,18 +3,9 @@
 from pathlib import Path
 
 from flocust.common.models import ReportCard, RequestResult
+from flocust.common.utils import percentile
 
 DEFAULT_RESULT_FILENAME = "results.jsonl"
-
-
-def _percentile(sorted_values: list[float], p: float) -> float:
-    """Return p-th percentile (0-100)."""
-    if not sorted_values:
-        return 0.0
-    k = (len(sorted_values) - 1) * (p / 100)
-    f = int(k)
-    c = 1 if f < len(sorted_values) - 1 else 0
-    return sorted_values[f] * (1 - (k - f)) + sorted_values[f + c] * (k - f)
 
 
 def _std(values: list[float]) -> float:
@@ -30,7 +21,7 @@ def compute_report(
     results: list[RequestResult],
     experiment_id: str,
     duration_seconds: float,
-    result_file: str = "result.jsonl",
+    result_file: str = DEFAULT_RESULT_FILENAME,
 ) -> ReportCard:
     """
     Compute report card from list of RequestResults.
@@ -89,9 +80,9 @@ def compute_report(
     ttft_sorted = sorted(ttft_values) if ttft_values else []
     ttft_min = min(ttft_sorted) if ttft_sorted else None
     ttft_max = max(ttft_sorted) if ttft_sorted else None
-    ttft_p50 = _percentile(ttft_sorted, 50) if ttft_sorted else None
-    ttft_p90 = _percentile(ttft_sorted, 90) if ttft_sorted else None
-    ttft_p99 = _percentile(ttft_sorted, 99) if ttft_sorted else None
+    ttft_p50 = percentile(ttft_sorted, 50) if ttft_sorted else None
+    ttft_p90 = percentile(ttft_sorted, 90) if ttft_sorted else None
+    ttft_p99 = percentile(ttft_sorted, 99) if ttft_sorted else None
     ttft_std = _std(ttft_values) if ttft_values else None
 
     all_inter_latencies = []
@@ -104,9 +95,9 @@ def compute_report(
     inter_token_sorted = sorted(all_inter_latencies) if all_inter_latencies else []
     inter_token_min = min(inter_token_sorted) if inter_token_sorted else None
     inter_token_max = max(inter_token_sorted) if inter_token_sorted else None
-    inter_token_p50 = _percentile(inter_token_sorted, 50) if inter_token_sorted else None
-    inter_token_p90 = _percentile(inter_token_sorted, 90) if inter_token_sorted else None
-    inter_token_p95 = _percentile(inter_token_sorted, 95) if inter_token_sorted else None
+    inter_token_p50 = percentile(inter_token_sorted, 50) if inter_token_sorted else None
+    inter_token_p90 = percentile(inter_token_sorted, 90) if inter_token_sorted else None
+    inter_token_p95 = percentile(inter_token_sorted, 95) if inter_token_sorted else None
     inter_token_std = _std(all_inter_latencies) if all_inter_latencies else None
 
     total_in = sum(r.input_tokens for r in results)
@@ -121,10 +112,10 @@ def compute_report(
         average_latency_ms=round(avg_latency, 2),
         latency_min_ms=round(latency_min, 2),
         latency_max_ms=round(latency_max, 2),
-        latency_p50_ms=round(_percentile(latencies, 50), 2),
-        latency_p90_ms=round(_percentile(latencies, 90), 2),
-        latency_p95_ms=round(_percentile(latencies, 95), 2),
-        latency_p99_ms=round(_percentile(latencies, 99), 2),
+        latency_p50_ms=round(percentile(latencies, 50), 2),
+        latency_p90_ms=round(percentile(latencies, 90), 2),
+        latency_p95_ms=round(percentile(latencies, 95), 2),
+        latency_p99_ms=round(percentile(latencies, 99), 2),
         latency_std_ms=round(latency_std, 2),
         ttft_available=ttft_available,
         average_ttft_ms=round(avg_ttft, 2) if avg_ttft is not None else None,

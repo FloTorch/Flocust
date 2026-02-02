@@ -1,0 +1,25 @@
+{
+  "provider": "openai",
+  "provider_settings": {
+    "api_key": "YOUR_API_KEY",
+    "model": "flotorch/gemini-flash",
+    "base_url": "https://qa-gateway.flotorch.cloud/openai/v1",
+    "headers": {}
+  },
+  "bench": {
+    "concurrency": 100,
+    "requests": 500,
+    "duration_sec": 0,
+    "ramp_up_sec": 0,
+    "timeout_sec": 60,
+    "max_tokens": 50
+  },
+  "input_file": "prompts.jsonl",
+  "generate": {
+    "input_tokens": 500,
+    "theme": "lorem"
+  },
+  "report": {
+    "format": "console"
+  }
+}
