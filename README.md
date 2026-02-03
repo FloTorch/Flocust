@@ -13,7 +13,8 @@
 - **Per-request results** — `results.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, `input_tokens`, `output_tokens`, `tokens_per_sec`, inter-token latencies, success/error.
 - **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, inter-token latency stats, total tokens, **input/output token and tokens/sec distributions** (avg, min, max, std, p50/p90/p99), and actual RPS.
 - **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`). When the API does not return usage (e.g. streaming without usage in the stream), Flocust falls back to client-side token counts so you still get `input_tokens`, `output_tokens`, and `tokens_per_sec` for every request.
-- **Console dashboard** — After each run, a table shows TTFT, Request Latency, Inter Token Latency, **Input Tokens**, **Output Tokens**, and **Tokens/sec** (each with avg, min, max, p99, p90, p50, std), plus a summary line with total tokens and avg tokens/s.
+- **Console dashboard** — After each run, a table shows TTFT, Request Latency, Inter Token Latency, **Input Tokens**, **Output Tokens**, and **Tokens/sec** (each with avg, min, max, p99, p90, p50, std), plus a summary line with total tokens and avg tokens/s. When the API reports prompt cache usage, the dashboard also shows **Prompt cache:** requests with cache hit and total cached tokens.
+- **Prompt caching** — Optional **prompt cache** mode: when **disabled** (default), each request gets a unique prefix so the API does not reuse cached prompts (reproducible load tests). When **enabled** (`--prompt-cache` or `prompt_cache: true` in config), prompts are sent as-is so the API can cache; results and report include `cached_tokens` and aggregated cache stats when the API reports them (e.g. OpenAI `prompt_tokens_details.cached_tokens`).
 - **CLI** — Run with a config file or interactively (terminal prompts); run load test and view report/dashboard.
 - **REST API** — FastAPI server with run endpoint (file upload or prompt generation), report download, and health check.
 
@@ -85,6 +86,7 @@ Use a JSON file to define provider settings, benchmark parameters, and input/rep
 | | `stream` | bool | Use streaming for TTFT/inter-token metrics. |
 | | `generate_prompts` | bool | If true, generate prompts via LLM; then `input_file` can be omitted. |
 | | `generate_prompts_count` | int \| null | Number of prompts to generate (1–1000); used when `generate_prompts` is true. |
+| | `prompt_cache` | bool | If true, send prompts as-is so the API can use prompt caching. If false (default), each request gets a unique prefix so no cache hits (reproducible load tests). |
 | **input_file** | — | string | Path to prompts file (JSON or JSONL), relative to config file. Required if `generate_prompts` is false. |
 | **report** | `format` | string | Output format: `"console"` or `"json"`. |
 
@@ -118,7 +120,8 @@ Example: `"api_key": "$OPENAI_API_KEY"` or `"api_key": "env:OPENAI_API_KEY"`. If
     "max_tokens": 1024,
     "stream": true,
     "generate_prompts": false,
-    "generate_prompts_count": null
+    "generate_prompts_count": null,
+    "prompt_cache": false
   },
   "input_file": "prompts.jsonl",
   "report": { "format": "console" }
@@ -143,7 +146,11 @@ flocust --config path/to/config.json
 flocust -c path/to/config.json
 ```
 
-If the file is missing, the CLI exits with an error (e.g. `Config file not found`).
+If the file is missing, the CLI exits with an error (e.g. `Config file not found`). To enable **prompt caching** (send prompts as-is so the API can cache), pass `--prompt-cache`:
+
+```bash
+flocust -c config.json --prompt-cache
+```
 
 ### Option B: Interactive (no config file)
 
@@ -170,6 +177,7 @@ You will be prompted for:
 | Request timeout (seconds) | Per-request timeout | `60` |
 | Max tokens per completion | Cap per response | `1024` |
 | Stream responses? | Use streaming (TTFT/inter-token) or not | `y` |
+| Enable prompt caching? | `y` = send prompts as-is (API can cache); `n` = unique request per call (default) | `n` |
 | Prompts: (f)ile or (l)lm-generated | File path vs generate via LLM | `f` |
 | Prompts file path | Path to JSON/JSONL prompts (if file chosen) | `prompts.jsonl` |
 
@@ -311,6 +319,7 @@ One JSON object per line, one line per request. Fields include:
 - **req_id**, **input_prompt**, **output_result** — Request id, prompt, and model response.
 - **latency_ms**, **ttft_ms** — Total latency and time to first token (TTFT; null when not streaming).
 - **input_tokens**, **output_tokens**, **tokens_per_sec** — Token counts and throughput per request (from API usage when available; otherwise from tiktoken so streaming runs still get values).
+- **cached_tokens** — Input tokens served from the API’s prompt cache (e.g. OpenAI `prompt_tokens_details.cached_tokens`); present when the API reports it.
 - **inter_token_latencies**, **avg_inter_token_latency**, **p50/p90/p95_inter_token_latency** — Inter-token latency stats (when streaming).
 - **success**, **error** — Request success and error message if failed.
 
@@ -329,6 +338,7 @@ Aggregated metrics for the run. Includes:
 - **Inter-token latency** — average, min, max, p50/p90/p95, std (when streaming).
 - **Total tokens** — total_input_tokens, total_output_tokens, total_tokens.
 - **Token distributions (per request)** — input_tokens_avg/min/max/std/p50/p90/p99, output_tokens_*, average_tokens_per_sec, tokens_per_sec_min/max/std/p50/p90/p99.
+- **Prompt cache** (when API reports cached tokens) — total_cached_tokens, requests_with_cache_hit.
 - **requests_per_second_actual**, **result_file**, **notes**.
 
 Example (abbreviated):
