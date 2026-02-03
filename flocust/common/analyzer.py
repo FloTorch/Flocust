@@ -107,6 +107,36 @@ def compute_report(
     tps_values = [r.tokens_per_sec for r in results if getattr(r, "tokens_per_sec", None) is not None]
     avg_tokens_per_sec = (sum(tps_values) / len(tps_values)) if tps_values else None
 
+    # Per-request token stats for dashboard
+    in_tok = [r.input_tokens for r in results]
+    out_tok = [r.output_tokens for r in results]
+    in_tok_sorted = sorted(in_tok) if in_tok else []
+    out_tok_sorted = sorted(out_tok) if out_tok else []
+    tps_sorted = sorted(tps_values) if tps_values else []
+
+    input_tokens_min = min(in_tok) if in_tok else 0
+    input_tokens_max = max(in_tok) if in_tok else 0
+    input_tokens_avg = total_in / len(results) if results else 0.0
+    input_tokens_std = _std([float(x) for x in in_tok]) if len(in_tok) >= 2 else 0.0
+    input_tokens_p50 = percentile(in_tok_sorted, 50) if in_tok_sorted else 0.0
+    input_tokens_p90 = percentile(in_tok_sorted, 90) if in_tok_sorted else 0.0
+    input_tokens_p99 = percentile(in_tok_sorted, 99) if in_tok_sorted else 0.0
+
+    output_tokens_min = min(out_tok) if out_tok else 0
+    output_tokens_max = max(out_tok) if out_tok else 0
+    output_tokens_avg = total_out / len(results) if results else 0.0
+    output_tokens_std = _std([float(x) for x in out_tok]) if len(out_tok) >= 2 else 0.0
+    output_tokens_p50 = percentile(out_tok_sorted, 50) if out_tok_sorted else 0.0
+    output_tokens_p90 = percentile(out_tok_sorted, 90) if out_tok_sorted else 0.0
+    output_tokens_p99 = percentile(out_tok_sorted, 99) if out_tok_sorted else 0.0
+
+    tokens_per_sec_min = min(tps_values) if tps_values else None
+    tokens_per_sec_max = max(tps_values) if tps_values else None
+    tokens_per_sec_std = _std(tps_values) if len(tps_values) >= 2 else None
+    tokens_per_sec_p50 = percentile(tps_sorted, 50) if tps_sorted else None
+    tokens_per_sec_p90 = percentile(tps_sorted, 90) if tps_sorted else None
+    tokens_per_sec_p99 = percentile(tps_sorted, 99) if tps_sorted else None
+
     return ReportCard(
         experiment_id=experiment_id,
         total_requests=len(results),
@@ -139,7 +169,27 @@ def compute_report(
         total_input_tokens=total_in,
         total_output_tokens=total_out,
         total_tokens=total_in + total_out,
+        input_tokens_min=input_tokens_min,
+        input_tokens_max=input_tokens_max,
+        input_tokens_avg=round(input_tokens_avg, 2),
+        input_tokens_std=round(input_tokens_std, 2),
+        input_tokens_p50=round(input_tokens_p50, 2),
+        input_tokens_p90=round(input_tokens_p90, 2),
+        input_tokens_p99=round(input_tokens_p99, 2),
+        output_tokens_min=output_tokens_min,
+        output_tokens_max=output_tokens_max,
+        output_tokens_avg=round(output_tokens_avg, 2),
+        output_tokens_std=round(output_tokens_std, 2),
+        output_tokens_p50=round(output_tokens_p50, 2),
+        output_tokens_p90=round(output_tokens_p90, 2),
+        output_tokens_p99=round(output_tokens_p99, 2),
         average_tokens_per_sec=round(avg_tokens_per_sec, 2) if avg_tokens_per_sec is not None else None,
+        tokens_per_sec_min=round(tokens_per_sec_min, 2) if tokens_per_sec_min is not None else None,
+        tokens_per_sec_max=round(tokens_per_sec_max, 2) if tokens_per_sec_max is not None else None,
+        tokens_per_sec_std=round(tokens_per_sec_std, 2) if tokens_per_sec_std is not None else None,
+        tokens_per_sec_p50=round(tokens_per_sec_p50, 2) if tokens_per_sec_p50 is not None else None,
+        tokens_per_sec_p90=round(tokens_per_sec_p90, 2) if tokens_per_sec_p90 is not None else None,
+        tokens_per_sec_p99=round(tokens_per_sec_p99, 2) if tokens_per_sec_p99 is not None else None,
         requests_per_second_actual=round(rps, 2),
         result_file=result_file,
         notes=None,
