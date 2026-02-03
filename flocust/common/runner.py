@@ -21,7 +21,25 @@ from locust.log import setup_logging
 from flocust.common.config import RunConfig
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
+from flocust.common.tokenizer import count_tokens
 from flocust.common.utils import percentile
+
+# Input token cache for repeated prompts (avoids re-tokenizing)
+_input_token_cache: dict[str, int] = {}
+_INPUT_TOKEN_CACHE_MAX = 256
+_cache_lock = threading.Lock()
+
+
+def _cached_input_tokens(prompt: str, encoding: str) -> int:
+    """Return input token count using tiktoken; cache repeated prompts."""
+    with _cache_lock:
+        if prompt in _input_token_cache:
+            return _input_token_cache[prompt]
+        n = count_tokens(prompt, encoding)
+        if len(_input_token_cache) >= _INPUT_TOKEN_CACHE_MAX:
+            _input_token_cache.clear()
+        _input_token_cache[prompt] = n
+        return n
 
 # Default count for LLM-generated prompts (10–20% of num_requests).
 GENERATE_PROMPTS_DEFAULT_PERCENT = 0.15
@@ -354,9 +372,16 @@ class LLMUser(HttpUser):
             end_time = time.perf_counter_ns()
             latency_ms = (end_time - start_time) / 1e6
 
+        # Fallback: when API didn't return usage (e.g. streaming without usage in stream), compute client-side
+        encoding = self.environment.parsed_options.encoding
+        if input_tokens == 0:
+            input_tokens = _cached_input_tokens(prompt, encoding)
+        if output_tokens == 0 and content:
+            output_tokens = count_tokens(content, encoding)
+
         success = status_code == 200
         total_tokens = input_tokens + output_tokens
-        tokens_per_sec = round((total_tokens / (latency_ms / 1000)), 2) if latency_ms > 0 and total_tokens >= 0 else None
+        tokens_per_sec = round((total_tokens / (latency_ms / 1000)), 2) if latency_ms > 0 and total_tokens > 0 else None
         result = RequestResult(
             req_id=req_id,
             input_prompt=prompt,

@@ -136,6 +136,36 @@ def display_dashboard(report: ReportCard, results: list[RequestResult]) -> None:
         itl_std = report.inter_token_latency_std_ms or 0.0
         print(row("Inter Token Latency", itl_avg, itl_min, itl_max, itl_p99, itl_p90, itl_p50, itl_std))
 
+    # Input tokens (per request)
+    in_avg = getattr(report, "input_tokens_avg", 0.0) or 0.0
+    in_min = float(getattr(report, "input_tokens_min", 0) or 0)
+    in_max = float(getattr(report, "input_tokens_max", 0) or 0)
+    in_p99 = getattr(report, "input_tokens_p99", 0.0) or in_avg
+    in_p90 = getattr(report, "input_tokens_p90", 0.0) or in_avg
+    in_p50 = getattr(report, "input_tokens_p50", 0.0) or in_avg
+    in_std = getattr(report, "input_tokens_std", 0.0) or 0.0
+    print(row("Input Tokens", in_avg, in_min, in_max, in_p99, in_p90, in_p50, in_std))
+
+    # Output tokens (per request)
+    out_avg = getattr(report, "output_tokens_avg", 0.0) or 0.0
+    out_min = float(getattr(report, "output_tokens_min", 0) or 0)
+    out_max = float(getattr(report, "output_tokens_max", 0) or 0)
+    out_p99 = getattr(report, "output_tokens_p99", 0.0) or out_avg
+    out_p90 = getattr(report, "output_tokens_p90", 0.0) or out_avg
+    out_p50 = getattr(report, "output_tokens_p50", 0.0) or out_avg
+    out_std = getattr(report, "output_tokens_std", 0.0) or 0.0
+    print(row("Output Tokens", out_avg, out_min, out_max, out_p99, out_p90, out_p50, out_std))
+
+    # Tokens per second (per request)
+    tps_avg = getattr(report, "average_tokens_per_sec", None) or 0.0
+    tps_min = getattr(report, "tokens_per_sec_min", None) or tps_avg
+    tps_max = getattr(report, "tokens_per_sec_max", None) or tps_avg
+    tps_p99 = getattr(report, "tokens_per_sec_p99", None) or tps_avg
+    tps_p90 = getattr(report, "tokens_per_sec_p90", None) or tps_avg
+    tps_p50 = getattr(report, "tokens_per_sec_p50", None) or tps_avg
+    tps_std = getattr(report, "tokens_per_sec_std", None) or 0.0
+    print(row("Tokens/sec", tps_avg, tps_min, tps_max, tps_p99, tps_p90, tps_p50, tps_std))
+
     print("-" * min(tw, 95))
     summary = f"Total Requests: {report.total_requests} | Successful: {report.successful_requests}"
     if report.failed_requests > 0:

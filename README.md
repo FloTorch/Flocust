@@ -10,9 +10,10 @@
 - **Configurable load** — Concurrency (virtual users), target requests per second, and total request count or duration.
 - **Flexible prompts** — Load from a prompts file (JSON/JSONL) or generate prompts via a one-shot LLM call.
 - **Streaming and non-streaming** — Default streaming for full metrics; optional non-streaming for latency-only measurement.
-- **Per-request results** — `results.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, token counts, success/error.
-- **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, total tokens, and actual RPS.
-- **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`).
+- **Per-request results** — `results.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, `input_tokens`, `output_tokens`, `tokens_per_sec`, inter-token latencies, success/error.
+- **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, inter-token latency stats, total tokens, **input/output token and tokens/sec distributions** (avg, min, max, std, p50/p90/p99), and actual RPS.
+- **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`). When the API does not return usage (e.g. streaming without usage in the stream), Flocust falls back to client-side token counts so you still get `input_tokens`, `output_tokens`, and `tokens_per_sec` for every request.
+- **Console dashboard** — After each run, a table shows TTFT, Request Latency, Inter Token Latency, **Input Tokens**, **Output Tokens**, and **Tokens/sec** (each with avg, min, max, p99, p90, p50, std), plus a summary line with total tokens and avg tokens/s.
 - **CLI** — Run with a config file or interactively (terminal prompts); run load test and view report/dashboard.
 - **REST API** — FastAPI server with run endpoint (file upload or prompt generation), report download, and health check.
 
@@ -174,10 +175,10 @@ You will be prompted for:
 
 Output is written under `artifacts/<model>-users<N>-rps<R>/` (e.g. `artifacts/gpt-4o-mini-users10-rps5/`), containing:
 
-- `results.jsonl` — One JSON object per request (latency, TTFT, tokens, success/error).
-- `report.json` — Aggregated report (latency percentiles, TTFT, RPS, token totals).
+- `results.jsonl` — One JSON object per request: latency, TTFT, input_tokens, output_tokens, tokens_per_sec, inter-token latencies (and per-request percentiles), success/error.
+- `report.json` — Aggregated report: latency percentiles, TTFT and inter-token latency stats, total tokens, **input/output token and tokens/sec distributions** (min, max, avg, std, p50/p90/p99), and actual RPS.
 
-A summary and dashboard are printed to the console after the run.
+A summary and **console dashboard** are printed after the run: a table with TTFT, Request Latency, Inter Token Latency, Input Tokens, Output Tokens, and Tokens/sec (each row: avg, min, max, p99, p90, p50, std), plus a summary line.
 
 ---
 
@@ -281,19 +282,21 @@ Flocust/
 │   │   ├── __init__.py
 │   │   └── main.py             # CLI entry (flocust), interactive prompts
 │   ├── common/                 # Shared logic
-│   │   ├── analyzer.py        # compute_report, write_report
+│   │   ├── analyzer.py        # compute_report, write_report (incl. token distributions)
 │   │   ├── config.py          # RunConfig, ConfigFile, load_config_from_file
-│   │   ├── dashboard.py       # Console report display
+│   │   ├── dashboard.py       # Console table (TTFT, latency, inter-token, tokens, tokens/sec)
+│   │   ├── generator.py       # Synthetic prompt generation (lorem/code)
 │   │   ├── loader.py          # load_prompts (JSON/JSONL)
-│   │   ├── models.py          # RequestResult, ReportCard
-│   │   ├── runner.py          # Locust user, run_experiment()
-│   │   ├── tokenizer.py       # tiktoken count_tokens
+│   │   ├── models.py          # RequestResult, ReportCard (incl. token distribution fields)
+│   │   ├── runner.py          # Locust user, run_experiment(), token fallback for streaming
+│   │   ├── tokenizer.py       # tiktoken count_tokens, encoding cache
 │   │   └── utils.py           # percentile, etc.
 │   └── config.sample.json     # Example config
 ├── config.json                # Optional local config (git-ignored if desired)
 ├── prompts.jsonl              # Example prompts
 ├── pyproject.toml
 ├── requirements.txt
+├── TECHNICAL_OVERVIEW.md      # Latency/token measurement, results writing, workflow
 └── README.md
 ```
 
@@ -303,15 +306,32 @@ Flocust/
 
 ### `results.jsonl`
 
-One JSON object per line, one line per request. Example:
+One JSON object per line, one line per request. Fields include:
+
+- **req_id**, **input_prompt**, **output_result** — Request id, prompt, and model response.
+- **latency_ms**, **ttft_ms** — Total latency and time to first token (TTFT; null when not streaming).
+- **input_tokens**, **output_tokens**, **tokens_per_sec** — Token counts and throughput per request (from API usage when available; otherwise from tiktoken so streaming runs still get values).
+- **inter_token_latencies**, **avg_inter_token_latency**, **p50/p90/p95_inter_token_latency** — Inter-token latency stats (when streaming).
+- **success**, **error** — Request success and error message if failed.
+
+Example (streaming):
 
 ```json
-{"req_id":"abc123_1","input_prompt":"What is 2+2?","output_result":"4","latency_ms":450.2,"ttft_ms":120.1,"input_tokens":8,"output_tokens":2,"success":true,"error":null}
+{"req_id":"abc123","input_prompt":"What is 2+2?","output_result":"4","latency_ms":450.2,"ttft_ms":120.1,"input_tokens":8,"output_tokens":2,"tokens_per_sec":22.5,"success":true,"error":null,"inter_token_latencies":[12.1,8.3],"avg_inter_token_latency":10.2,"p50_inter_token_latency":10.0,"p90_inter_token_latency":12.0,"p95_inter_token_latency":12.5}
 ```
 
 ### `report.json` (report card)
 
-Aggregated metrics for the run. Example:
+Aggregated metrics for the run. Includes:
+
+- **Latency** — average, min, max, p50/p90/p95/p99, std.
+- **TTFT** — average, min, max, p50/p90/p99, std (when streaming).
+- **Inter-token latency** — average, min, max, p50/p90/p95, std (when streaming).
+- **Total tokens** — total_input_tokens, total_output_tokens, total_tokens.
+- **Token distributions (per request)** — input_tokens_avg/min/max/std/p50/p90/p99, output_tokens_*, average_tokens_per_sec, tokens_per_sec_min/max/std/p50/p90/p99.
+- **requests_per_second_actual**, **result_file**, **notes**.
+
+Example (abbreviated):
 
 ```json
 {
@@ -326,16 +346,33 @@ Aggregated metrics for the run. Example:
   "latency_p99_ms": 890.0,
   "ttft_available": true,
   "average_ttft_ms": 110.2,
+  "inter_token_latency_available": true,
+  "average_inter_token_latency_ms": 8.5,
   "total_input_tokens": 1200,
   "total_output_tokens": 450,
   "total_tokens": 1650,
+  "input_tokens_avg": 12.0,
+  "input_tokens_min": 8,
+  "input_tokens_max": 22,
+  "output_tokens_avg": 4.5,
+  "output_tokens_min": 2,
+  "output_tokens_max": 15,
+  "average_tokens_per_sec": 25.3,
+  "tokens_per_sec_min": 10.2,
+  "tokens_per_sec_max": 45.0,
   "requests_per_second_actual": 4.8,
   "result_file": "results.jsonl",
   "notes": null
 }
 ```
 
-When `stream=false`, TTFT and inter-token fields may be omitted or null; only end-to-end latency is reported.
+When `stream=false`, TTFT and inter-token fields may be omitted or null; only end-to-end latency is reported. Token counts and tokens_per_sec are still reported (from API usage or tiktoken fallback).
+
+---
+
+## Documentation
+
+For implementation details (how latency, TTFT, and inter-token latency are measured; token counting and fallback when the API does not return usage; results writing and report aggregation; ramp-up and load control), see **[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md)**.
 
 ---
 
