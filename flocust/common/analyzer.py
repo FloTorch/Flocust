@@ -64,6 +64,8 @@ def compute_report(
             average_tokens_per_sec=None,
             requests_per_second_actual=0.0,
             result_file=result_file,
+            total_cached_tokens=0,
+            requests_with_cache_hit=0,
         )
 
     successful = [r for r in results if r.success]
@@ -137,6 +139,10 @@ def compute_report(
     tokens_per_sec_p90 = percentile(tps_sorted, 90) if tps_sorted else None
     tokens_per_sec_p99 = percentile(tps_sorted, 99) if tps_sorted else None
 
+    cached_tokens_list = [r.cached_tokens for r in results if getattr(r, "cached_tokens", None) is not None]
+    total_cached_tokens = sum(cached_tokens_list)
+    requests_with_cache_hit = sum(1 for r in results if getattr(r, "cached_tokens", None) and r.cached_tokens > 0)
+
     return ReportCard(
         experiment_id=experiment_id,
         total_requests=len(results),
@@ -193,6 +199,8 @@ def compute_report(
         requests_per_second_actual=round(rps, 2),
         result_file=result_file,
         notes=None,
+        total_cached_tokens=total_cached_tokens,
+        requests_with_cache_hit=requests_with_cache_hit,
     )
 
 

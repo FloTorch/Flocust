@@ -174,4 +174,8 @@ def display_dashboard(report: ReportCard, results: list[RequestResult]) -> None:
     if report.average_tokens_per_sec is not None:
         summary += f" | Avg tokens/s: {_c(_fmt(report.average_tokens_per_sec), Colors.GREEN)}"
     print(summary)
+    total_cached = getattr(report, "total_cached_tokens", 0) or 0
+    cache_hits = getattr(report, "requests_with_cache_hit", 0) or 0
+    if total_cached > 0 or cache_hits > 0:
+        print(_c("Prompt cache: ", Colors.CYAN) + f"{cache_hits} requests with cache hit, {total_cached} total cached tokens")
     print()

@@ -136,6 +136,7 @@ def collect_config_from_cli() -> RunConfig:
     timeout_sec = _prompt_int("Request timeout (seconds)", 60, 1, 300)
     max_tokens = _prompt_int("Max tokens per completion", 1024, 1, 128_000)
     stream = _prompt_bool("Stream responses (TTFT/inter-token)? (y/n)", default=True)
+    prompt_cache = _prompt_bool("Enable prompt caching (y/n)? (n = unique request per call)", default=False)
 
     generate_type = _prompt("Prompts: (f)ile, (l)lm-generated", "f").lower().strip()
     prompts_path: Path | None = None
@@ -182,6 +183,7 @@ def collect_config_from_cli() -> RunConfig:
         use_rps_throttle=use_rps_throttle,
         encoding=DEFAULT_ENCODING,  # type: ignore[arg-type]
         stream=stream,
+        prompt_cache=prompt_cache,
         generate_prompts=generate_prompts,
         generate_prompts_count=generate_prompts_count,
     )
@@ -197,7 +199,7 @@ Supported usage:
   flocust                 Run load test: use config.json if present, else interactive
   flocust CONFIG          Run load test with CONFIG (e.g. config.json)
   flocust -c PATH         Run load test with config file at PATH
-  flocust --config PATH   Same as -c PATH
+  flocust --prompt-cache  Enable prompt caching (default: disabled)
   flocust -h, --help      Show this help and exit
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -218,6 +220,12 @@ Supported usage:
         metavar="CONFIG",
         help="Config JSON file. If omitted and config.json exists, it is used; else interactive mode.",
     )
+    parser.add_argument(
+        "--prompt-cache",
+        action="store_true",
+        dest="prompt_cache",
+        help="Enable prompt caching (default: disabled so each request avoids cache for reproducible load tests).",
+    )
     return parser.parse_args()
 
 
@@ -236,6 +244,8 @@ def main() -> None:
 
     try:
         config = collect_config(config_path)
+        if getattr(args, "prompt_cache", False):
+            config = config.model_copy(update={"prompt_cache": True})
     except FileNotFoundError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -249,7 +259,7 @@ def main() -> None:
 
     print(
         f"Config loaded: output_dir={config.output_dir}, "
-        f"generate_prompts={config.generate_prompts}"
+        f"generate_prompts={config.generate_prompts}, prompt_cache={config.prompt_cache}"
     )
     print("\nRunning load test...")
 
