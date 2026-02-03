@@ -17,6 +17,11 @@ class RequestResult(BaseModel):
     ttft_ms: float | None = Field(default=None, description="Time to first token in milliseconds")
     input_tokens: int = Field(..., ge=0, description="Input token count (from LLM usage)")
     output_tokens: int = Field(..., ge=0, description="Output token count (from LLM usage)")
+    cached_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Input tokens served from cache (OpenAI prompt_tokens_details.cached_tokens); None if not reported",
+    )
     tokens_per_sec: float | None = Field(default=None, ge=0, description="Total tokens per second for this request")
     success: bool = Field(default=True, description="Whether the request succeeded")
     error: str | None = Field(default=None, description="Error message if failed")
@@ -98,3 +103,6 @@ class ReportCard(BaseModel):
     requests_per_second_actual: float = Field(..., ge=0)
     result_file: str = Field(default="result.jsonl")
     notes: str | None = Field(default=None)
+    # Prompt cache (from usage.prompt_tokens_details.cached_tokens when reported by API)
+    total_cached_tokens: int = Field(default=0, ge=0, description="Sum of cached_tokens across requests")
+    requests_with_cache_hit: int = Field(default=0, ge=0, description="Number of requests with cached_tokens > 0")

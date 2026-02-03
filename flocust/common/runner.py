@@ -83,6 +83,20 @@ def _usage_from_llm(usage_or_data: dict) -> tuple[int, int]:
     )
 
 
+def _cached_tokens_from_usage(usage_or_data: dict) -> int | None:
+    """Extract cached_tokens from OpenAI-style usage (prompt_tokens_details.cached_tokens)."""
+    if not isinstance(usage_or_data, dict):
+        return None
+    usage = usage_or_data.get("usage") if isinstance(usage_or_data.get("usage"), dict) else usage_or_data
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("prompt_tokens_details") or usage.get("promptTokensDetails")
+    if not isinstance(details, dict):
+        return None
+    val = details.get("cached_tokens") or details.get("cachedTokens")
+    return int(val) if val is not None else None
+
+
 class RequestLimiter:
     """Strict limit: allow exactly N requests (no overshoot)."""
 
@@ -259,9 +273,13 @@ class LLMUser(HttpUser):
             return
         req_id, prompt = self._next_prompt()
         stream = self.environment.parsed_options.stream
+        prompt_cache = getattr(self.environment.parsed_options, "prompt_cache", False)
+        # When prompt_cache is False (default), prepend a unique nonce so each request
+        # has a different prefix → no OpenAI prompt cache hits (reproducible load tests).
+        user_content = prompt if prompt_cache else f"[req:{req_id}]\n{prompt}"
         payload = {
             "model": self.environment.parsed_options.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": user_content}],
             "max_tokens": self.environment.parsed_options.max_tokens,
             "temperature": 0.0,
             "stream": stream,
@@ -276,6 +294,7 @@ class LLMUser(HttpUser):
         input_tokens = 0
         output_tokens = 0
         stream_usage: dict = {}
+        response_data: dict = {}  # full response for non-stream (for cached_tokens)
 
         if stream:
             ttft_start = None
@@ -351,13 +370,13 @@ class LLMUser(HttpUser):
                     status_code = response.status_code
                     if status_code == 200:
                         try:
-                            data = response.json()
-                            choices = data.get("choices") or []
+                            response_data = response.json()
+                            choices = response_data.get("choices") or []
                             if choices and isinstance(choices[0], dict):
                                 msg = choices[0].get("message") or {}
                                 if isinstance(msg, dict):
                                     content = (msg.get("content") or "").strip()
-                            usage = data.get("usage") or {}
+                            usage = response_data.get("usage") or {}
                             input_tokens, output_tokens = _usage_from_llm(usage)
                             response.success()
                         except Exception:
@@ -379,6 +398,10 @@ class LLMUser(HttpUser):
         if output_tokens == 0 and content:
             output_tokens = count_tokens(content, encoding)
 
+        cached_tokens = (
+            _cached_tokens_from_usage(stream_usage) if stream else _cached_tokens_from_usage(response_data)
+        )
+
         success = status_code == 200
         total_tokens = input_tokens + output_tokens
         tokens_per_sec = round((total_tokens / (latency_ms / 1000)), 2) if latency_ms > 0 and total_tokens > 0 else None
@@ -390,6 +413,7 @@ class LLMUser(HttpUser):
             ttft_ms=round(ttft_ms, 2) if ttft_ms else None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
             tokens_per_sec=tokens_per_sec,
             success=success,
             error=None if success else (error_msg or f"HTTP {status_code}"),
@@ -506,6 +530,7 @@ def _run_experiment_programmatic(
         "encoding": config.encoding,
         "timeout": config.timeout_sec,
         "stream": config.stream,
+        "prompt_cache": getattr(config, "prompt_cache", False),
     })()
 
     # Pass test runner instance to users

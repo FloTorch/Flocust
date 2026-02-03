@@ -46,6 +46,10 @@ class BenchSettings(BaseModel):
     timeout_sec: int = Field(default=60, ge=1, le=300)
     max_tokens: int = Field(default=1024, ge=1, le=128_000)
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
+    prompt_cache: bool = Field(
+        default=False,
+        description="Enable OpenAI-style prompt caching (default: disabled for reproducible load tests)",
+    )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
 
@@ -126,6 +130,10 @@ class RunConfig(BaseModel):
         description="When False, max throughput; when True, throttle to requests_per_second",
     )
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
+    prompt_cache: bool = Field(
+        default=False,
+        description="Enable prompt caching; when False, each request is made unique to avoid cache hits",
+    )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(
@@ -217,6 +225,7 @@ def load_config_from_file(path: Path) -> RunConfig:
         ramp_up_sec=bench.ramp_up_sec,
         use_rps_throttle=use_rps_throttle,
         stream=bench.stream,
+        prompt_cache=bench.prompt_cache,
         generate_prompts=bench.generate_prompts,
         generate_prompts_count=bench.generate_prompts_count,
         encoding="cl100k_base",
