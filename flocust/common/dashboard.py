@@ -140,5 +140,8 @@ def display_dashboard(report: ReportCard, results: list[RequestResult]) -> None:
     summary = f"Total Requests: {report.total_requests} | Successful: {report.successful_requests}"
     if report.failed_requests > 0:
         summary += f" | Failed: {_c(str(report.failed_requests), Colors.RED)}"
+    summary += f" | Input tokens: {report.total_input_tokens} | Output tokens: {report.total_output_tokens} | Total tokens: {report.total_tokens}"
+    if report.average_tokens_per_sec is not None:
+        summary += f" | Avg tokens/s: {_c(_fmt(report.average_tokens_per_sec), Colors.GREEN)}"
     print(summary)
     print()

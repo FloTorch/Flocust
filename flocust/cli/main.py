@@ -2,9 +2,9 @@
 CLI for Flocust: load config from file or interactive prompts, run load test.
 
 Usage:
-  python -m flocust.cli.main
-  python -m flocust.cli.main -c config.json
-  python -m flocust.cli.main --config config.json
+  flocust                    # uses config.json if present, else interactive
+  flocust config.json        # load given config file
+  flocust -c config.json     # same via -c/--config
 """
 
 import argparse
@@ -24,6 +24,7 @@ from flocust.common.runner import run_experiment
 
 DEFAULT_ENCODING = "cl100k_base"
 DEFAULT_PROMPTS_PATH = Path("prompts.jsonl")
+DEFAULT_CONFIG_PATH = Path("config.json")
 
 __all__ = ["main", "collect_config", "collect_config_from_cli"]
 
@@ -191,6 +192,15 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Flocust — LLM endpoint load testing",
         prog="flocust",
+        epilog="""
+Supported usage:
+  flocust                 Run load test: use config.json if present, else interactive
+  flocust CONFIG          Run load test with CONFIG (e.g. config.json)
+  flocust -c PATH         Run load test with config file at PATH
+  flocust --config PATH   Same as -c PATH
+  flocust -h, --help      Show this help and exit
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "-c",
@@ -198,7 +208,15 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Path to config JSON file. If omitted, run in interactive mode.",
+        help="Path to config JSON file.",
+    )
+    parser.add_argument(
+        "config_path",
+        nargs="?",
+        type=Path,
+        default=None,
+        metavar="CONFIG",
+        help="Config JSON file. If omitted and config.json exists, it is used; else interactive mode.",
     )
     return parser.parse_args()
 
@@ -206,7 +224,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Entry point: load config, run experiment, write report and display dashboard."""
     args = _parse_args()
-    config_path: Path | None = args.config
+    # Prefer -c/--config, then positional CONFIG, then default config.json if it exists
+    config_path: Path | None = args.config or args.config_path
+    if config_path is None and DEFAULT_CONFIG_PATH.exists():
+        config_path = DEFAULT_CONFIG_PATH
 
     if config_path is not None:
         print(f"Loading config from: {config_path}")

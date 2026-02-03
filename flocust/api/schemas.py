@@ -50,6 +50,7 @@ class ReportSummary(BaseModel):
     total_input_tokens: int = Field(..., ge=0)
     total_output_tokens: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
+    average_tokens_per_sec: float | None = Field(default=None, ge=0)
     requests_per_second_actual: float = Field(..., ge=0)
 
 
@@ -87,6 +88,7 @@ def report_to_summary(report: ReportCard) -> ReportSummary:
         total_input_tokens=report.total_input_tokens,
         total_output_tokens=report.total_output_tokens,
         total_tokens=report.total_tokens,
+        average_tokens_per_sec=report.average_tokens_per_sec,
         requests_per_second_actual=report.requests_per_second_actual,
     )
 

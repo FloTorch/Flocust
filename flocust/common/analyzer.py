@@ -61,6 +61,7 @@ def compute_report(
             total_input_tokens=0,
             total_output_tokens=0,
             total_tokens=0,
+            average_tokens_per_sec=None,
             requests_per_second_actual=0.0,
             result_file=result_file,
         )
@@ -103,6 +104,8 @@ def compute_report(
     total_in = sum(r.input_tokens for r in results)
     total_out = sum(r.output_tokens for r in results)
     rps = len(results) / duration_seconds if duration_seconds > 0 else 0.0
+    tps_values = [r.tokens_per_sec for r in results if getattr(r, "tokens_per_sec", None) is not None]
+    avg_tokens_per_sec = (sum(tps_values) / len(tps_values)) if tps_values else None
 
     return ReportCard(
         experiment_id=experiment_id,
@@ -136,6 +139,7 @@ def compute_report(
         total_input_tokens=total_in,
         total_output_tokens=total_out,
         total_tokens=total_in + total_out,
+        average_tokens_per_sec=round(avg_tokens_per_sec, 2) if avg_tokens_per_sec is not None else None,
         requests_per_second_actual=round(rps, 2),
         result_file=result_file,
         notes=None,

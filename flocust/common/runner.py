@@ -21,7 +21,6 @@ from locust.log import setup_logging
 from flocust.common.config import RunConfig
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
-from flocust.common.tokenizer import count_tokens
 from flocust.common.utils import percentile
 
 # Default count for LLM-generated prompts (10–20% of num_requests).
@@ -34,10 +33,36 @@ FLUSH_EVERY_LINES = 10
 QUEUE_POLL_TIMEOUT = 0.1
 STOP_POLL_INTERVAL = 0.2
 
-# Input token cache (global cache is acceptable as it's just optimization)
-_input_token_cache: dict[str, int] = {}
-_INPUT_TOKEN_CACHE_MAX = 256
-_cache_lock = threading.Lock()
+def _usage_from_llm(usage_or_data: dict) -> tuple[int, int]:
+    """Extract input_tokens and output_tokens from LLM response.
+    Accepts either a usage dict or the full response. Supports:
+    - usage.prompt_tokens / completion_tokens (OpenAI)
+    - usage.input_tokens / output_tokens
+    - Top-level input_tokens / output_tokens
+    - CamelCase: inputTokens, outputTokens, promptTokens, completionTokens
+    """
+    if not isinstance(usage_or_data, dict):
+        return 0, 0
+    # If top-level has usage, prefer that; else use the dict itself
+    usage = usage_or_data.get("usage") if isinstance(usage_or_data.get("usage"), dict) else usage_or_data
+    if not isinstance(usage, dict):
+        usage = usage_or_data
+    inp = (
+        usage.get("prompt_tokens")
+        or usage.get("input_tokens")
+        or usage.get("promptTokens")
+        or usage.get("inputTokens")
+    )
+    out = (
+        usage.get("completion_tokens")
+        or usage.get("output_tokens")
+        or usage.get("completionTokens")
+        or usage.get("outputTokens")
+    )
+    return (
+        int(inp) if inp is not None else 0,
+        int(out) if out is not None else 0,
+    )
 
 
 class RequestLimiter:
@@ -93,18 +118,6 @@ class LoadTestRunner:
         self.output_dir: Optional[Path] = None
         self.result_path: Optional[Path] = None
 
-
-
-def _cached_input_tokens(prompt: str, encoding: str) -> int:
-    """Return input token count, using global cache for repeated prompts."""
-    with _cache_lock:
-        if prompt in _input_token_cache:
-            return _input_token_cache[prompt]
-        n = count_tokens(prompt, encoding)
-        if len(_input_token_cache) >= _INPUT_TOKEN_CACHE_MAX:
-            _input_token_cache.clear()
-        _input_token_cache[prompt] = n
-        return n
 
 
 _PROGRESS_LINE_WIDTH = 80
@@ -242,12 +255,13 @@ class LLMUser(HttpUser):
         error_msg = None
         ttft_ms = None
         inter_token_latencies: list[float] = []
+        input_tokens = 0
         output_tokens = 0
+        stream_usage: dict = {}
 
         if stream:
             ttft_start = None
             last_token_time = None
-            token_count = 0
             try:
                 timeout = self.environment.parsed_options.timeout
                 with self.client.post(
@@ -261,6 +275,7 @@ class LLMUser(HttpUser):
                     ttft_start = time.perf_counter_ns()
                     buffer = b""
                     seen_done = False
+                    content_done = False  # stop appending to content after 1000 chars, but keep reading for usage
                     for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
                         if not chunk:
                             continue
@@ -277,21 +292,24 @@ class LLMUser(HttpUser):
                             data_str = line_str[6:].strip()
                             if data_str == "[DONE]":
                                 seen_done = True
-                                buffer = b""
-                                break
-                            content_piece = self._parse_one_sse_line(data_str)
-                            if content_piece:
+                                # Continue processing buffer; usage is often in the same chunk after [DONE]
+                                continue
+                            parsed = self._parse_one_sse_line_with_usage(data_str)
+                            if parsed.get("usage"):
+                                stream_usage = parsed["usage"]
+                            content_piece = parsed.get("content", "")
+                            if content_piece and not content_done:
                                 if ttft_start is None:
                                     ttft_start = chunk_time
                                 content += content_piece
-                                token_count += 1
                                 if last_token_time is not None:
                                     inter_token_latencies.append((chunk_time - last_token_time) / 1e6)
                                 last_token_time = chunk_time
                                 if len(content) > 1000:
-                                    break
-                            if seen_done or len(content) > 1000:
+                                    content_done = True
+                            if seen_done:
                                 break
+                    input_tokens, output_tokens = _usage_from_llm(stream_usage)
                     if status_code == 200:
                         response.success()
                     else:
@@ -302,7 +320,6 @@ class LLMUser(HttpUser):
             end_time = time.perf_counter_ns()
             latency_ms = (end_time - start_time) / 1e6
             ttft_ms = ((ttft_start - start_time) / 1e6) if ttft_start and ttft_start >= start_time else None
-            output_tokens = token_count
         else:
             try:
                 timeout = self.environment.parsed_options.timeout
@@ -323,10 +340,7 @@ class LLMUser(HttpUser):
                                 if isinstance(msg, dict):
                                     content = (msg.get("content") or "").strip()
                             usage = data.get("usage") or {}
-                            if isinstance(usage, dict) and "completion_tokens" in usage:
-                                output_tokens = int(usage["completion_tokens"])
-                            else:
-                                output_tokens = count_tokens(content, self.environment.parsed_options.encoding)
+                            input_tokens, output_tokens = _usage_from_llm(usage)
                             response.success()
                         except Exception:
                             response.failure("Invalid JSON response")
@@ -340,8 +354,9 @@ class LLMUser(HttpUser):
             end_time = time.perf_counter_ns()
             latency_ms = (end_time - start_time) / 1e6
 
-        input_tokens = _cached_input_tokens(prompt, self.environment.parsed_options.encoding)
         success = status_code == 200
+        total_tokens = input_tokens + output_tokens
+        tokens_per_sec = round((total_tokens / (latency_ms / 1000)), 2) if latency_ms > 0 and total_tokens >= 0 else None
         result = RequestResult(
             req_id=req_id,
             input_prompt=prompt,
@@ -350,6 +365,7 @@ class LLMUser(HttpUser):
             ttft_ms=round(ttft_ms, 2) if ttft_ms else None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            tokens_per_sec=tokens_per_sec,
             success=success,
             error=None if success else (error_msg or f"HTTP {status_code}"),
         )
@@ -360,22 +376,30 @@ class LLMUser(HttpUser):
             LLMUser.test_runner_instance.results.append(result)
         LLMUser.test_runner_instance.progress_current += 1
 
-    def _parse_one_sse_line(self, data_str: str) -> str:
-        """Parse one SSE payload (after 'data: ') and return content from choices[0].delta.content."""
+    def _parse_one_sse_line_with_usage(self, data_str: str) -> dict:
+        """Parse one SSE payload (after 'data: '); return dict with 'content' and 'usage' from LLM.
+        'usage' is the full parsed object so _usage_from_llm can read from usage.* or top-level keys.
+        """
+        out: dict = {"content": "", "usage": {}}
         if not data_str or data_str == "[DONE]":
-            return ""
+            return out
         try:
             j = json.loads(data_str)
+            # Only store as usage when this chunk has usage-like keys (so we keep last real usage)
+            usage_keys = ("usage", "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens")
+            if any(k in j for k in usage_keys) or (isinstance(j.get("usage"), dict) and j["usage"]):
+                out["usage"] = j
             choices = j.get("choices") or []
             if not choices or not isinstance(choices[0], dict):
-                return ""
+                return out
             delta = choices[0].get("delta") or {}
             if not isinstance(delta, dict):
-                return ""
+                return out
             c = delta.get("content")
-            return c if isinstance(c, str) else ""
+            out["content"] = c if isinstance(c, str) else ""
+            return out
         except (json.JSONDecodeError, TypeError, KeyError):
-            return ""
+            return out
 
     @property
     def prompts(self):

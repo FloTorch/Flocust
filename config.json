@@ -1,21 +1,21 @@
 {
   "provider": "openai",
   "provider_settings": {
-    "api_key": "$OPENAI_API_KEY",
-    "model": "gpt-4o-mini",
-    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk_yjTHY6gRJmfDD55LelTDZI1r9e46LlJnBvSVj8JATj0=_N2JmMzZjYTYtNGI3Ny00NDY1LWFjYTktNWIxNjYxOTdhMjU0_ZmY1ZGRlMDktNTRkZC00M2VmLTgxNzktZmNhOTU2MzdhM2Fi",
+    "model": "flotorch/gemini-flash",
+    "base_url": "https://qa-gateway.flotorch.cloud/openai/v1",
     "headers": {}
   },
   "bench": {
-    "concurrency": 10,
-    "requests": 100,
+    "concurrency": 1,
+    "requests": 1,
     "requests_per_second": 5.0,
     "duration_sec": 0,
     "ramp_up_sec": 0,
     "timeout_sec": 60,
     "max_tokens": 1024,
     "stream": true,
-    "generate_prompts": false,
+    "generate_prompts": true,
     "generate_prompts_count": null
   },
   "input_file": "prompts.jsonl",
