@@ -21,25 +21,7 @@ from locust.log import setup_logging
 from flocust.common.config import RunConfig
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
-from flocust.common.tokenizer import count_tokens
 from flocust.common.utils import percentile
-
-# Input token cache for repeated prompts (avoids re-tokenizing)
-_input_token_cache: dict[str, int] = {}
-_INPUT_TOKEN_CACHE_MAX = 256
-_cache_lock = threading.Lock()
-
-
-def _cached_input_tokens(prompt: str, encoding: str) -> int:
-    """Return input token count using tiktoken; cache repeated prompts."""
-    with _cache_lock:
-        if prompt in _input_token_cache:
-            return _input_token_cache[prompt]
-        n = count_tokens(prompt, encoding)
-        if len(_input_token_cache) >= _INPUT_TOKEN_CACHE_MAX:
-            _input_token_cache.clear()
-        _input_token_cache[prompt] = n
-        return n
 
 # Default count for LLM-generated prompts (10–20% of num_requests).
 GENERATE_PROMPTS_DEFAULT_PERCENT = 0.15
@@ -51,36 +33,19 @@ FLUSH_EVERY_LINES = 10
 QUEUE_POLL_TIMEOUT = 0.1
 STOP_POLL_INTERVAL = 0.2
 
-def _usage_from_llm(usage_or_data: dict) -> tuple[int, int]:
-    """Extract input_tokens and output_tokens from LLM response.
-    Accepts either a usage dict or the full response. Supports:
-    - usage.prompt_tokens / completion_tokens (OpenAI)
-    - usage.input_tokens / output_tokens
-    - Top-level input_tokens / output_tokens
-    - CamelCase: inputTokens, outputTokens, promptTokens, completionTokens
-    """
-    if not isinstance(usage_or_data, dict):
+def _usage_from_headers(headers) -> tuple[int, int]:
+    """Extract input_tokens and output_tokens from response headers (e.g. x-input-tokens, x-completion-tokens)."""
+    if headers is None:
         return 0, 0
-    # If top-level has usage, prefer that; else use the dict itself
-    usage = usage_or_data.get("usage") if isinstance(usage_or_data.get("usage"), dict) else usage_or_data
-    if not isinstance(usage, dict):
-        usage = usage_or_data
-    inp = (
-        usage.get("prompt_tokens")
-        or usage.get("input_tokens")
-        or usage.get("promptTokens")
-        or usage.get("inputTokens")
-    )
-    out = (
-        usage.get("completion_tokens")
-        or usage.get("output_tokens")
-        or usage.get("completionTokens")
-        or usage.get("outputTokens")
-    )
-    return (
-        int(inp) if inp is not None else 0,
-        int(out) if out is not None else 0,
-    )
+    try:
+        inp = headers.get("x-input-tokens") or headers.get("x-prompt-tokens")
+        out = headers.get("x-completion-tokens") or headers.get("x-output-tokens")
+        return (
+            int(inp) if inp is not None else 0,
+            int(out) if out is not None else 0,
+        )
+    except (TypeError, ValueError):
+        return 0, 0
 
 
 def _cached_tokens_from_usage(usage_or_data: dict) -> int | None:
@@ -346,7 +311,7 @@ class LLMUser(HttpUser):
                                     content_done = True
                             if seen_done:
                                 break
-                    input_tokens, output_tokens = _usage_from_llm(stream_usage)
+                    input_tokens, output_tokens = _usage_from_headers(response.headers)
                     if status_code == 200:
                         response.success()
                     else:
@@ -376,8 +341,7 @@ class LLMUser(HttpUser):
                                 msg = choices[0].get("message") or {}
                                 if isinstance(msg, dict):
                                     content = (msg.get("content") or "").strip()
-                            usage = response_data.get("usage") or {}
-                            input_tokens, output_tokens = _usage_from_llm(usage)
+                            input_tokens, output_tokens = _usage_from_headers(response.headers)
                             response.success()
                         except Exception:
                             response.failure("Invalid JSON response")
@@ -390,13 +354,6 @@ class LLMUser(HttpUser):
                 error_msg = str(e)[:200]
             end_time = time.perf_counter_ns()
             latency_ms = (end_time - start_time) / 1e6
-
-        # Fallback: when API didn't return usage (e.g. streaming without usage in stream), compute client-side
-        encoding = self.environment.parsed_options.encoding
-        if input_tokens == 0:
-            input_tokens = _cached_input_tokens(prompt, encoding)
-        if output_tokens == 0 and content:
-            output_tokens = count_tokens(content, encoding)
 
         cached_tokens = (
             _cached_tokens_from_usage(stream_usage) if stream else _cached_tokens_from_usage(response_data)
@@ -426,8 +383,8 @@ class LLMUser(HttpUser):
         LLMUser.test_runner_instance.progress_current += 1
 
     def _parse_one_sse_line_with_usage(self, data_str: str) -> dict:
-        """Parse one SSE payload (after 'data: '); return dict with 'content' and 'usage' from LLM.
-        'usage' is the full parsed object so _usage_from_llm can read from usage.* or top-level keys.
+        """Parse one SSE payload (after 'data: '); return dict with 'content' and 'usage'.
+        'usage' is used for cached_tokens extraction only; token counts come from headers.
         """
         out: dict = {"content": "", "usage": {}}
         if not data_str or data_str == "[DONE]":

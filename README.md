@@ -1,48 +1,54 @@
-# Flocust
+<p align="center">
+  <img src="assets/flotorch_logo.png" alt="FlotorchEval Logo" width="200" />
+</p>
 
-**Flocust** is a production-ready LLM endpoint load testing tool built on [Locust](https://locust.io). It benchmarks OpenAI-compatible chat completion APIs with configurable concurrency and throughput, and reports latency, time-to-first-token (TTFT), inter-token latency, and token usage per request.
+<h2 align="center">FlotorchEval</h2>
+<p align="center"><strong>Load testing and evaluation for any OpenAI-compatible chat completions API</strong></p>
+
+<p align="center">
+  <a href="https://pypi.org/project/flocust/"><img src="https://img.shields.io/badge/PyPI-0.1.0-3776AB?logo=pypi&logoColor=white" alt="PyPI version" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-3776AB?logo=python&logoColor=white" alt="Python versions" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+  <a href="TECHNICAL_OVERVIEW.md"><img src="https://img.shields.io/badge/Documentation-technical%20overview-green" alt="Documentation" /></a>
+  <a href="https://flotorch.cloud"><img src="https://img.shields.io/badge/Website-flotorch.cloud-blue" alt="Website" /></a>
+</p>
+
+<p align="center">
+  <a href="#installation">Installation</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#examples">Examples</a> •
+  <a href="#documentation">Documentation</a> •
+  <a href="#contributing">Contributing</a>
+</p>
 
 ---
 
-## Features
+## About
 
-- **OpenAI-compatible API** — Targets `POST /chat/completions` with optional streaming for TTFT and inter-token metrics.
-- **Configurable load** — Concurrency (virtual users), target requests per second, and total request count or duration.
-- **Flexible prompts** — Load from a prompts file (JSON/JSONL) or generate prompts via a one-shot LLM call.
-- **Streaming and non-streaming** — Default streaming for full metrics; optional non-streaming for latency-only measurement.
-- **Per-request results** — `results.jsonl` with `req_id`, prompt, response, `latency_ms`, `ttft_ms`, `input_tokens`, `output_tokens`, `tokens_per_sec`, inter-token latencies, success/error.
-- **Report card** — `report.json` with latency percentiles (p50/p90/p95/p99), TTFT stats, inter-token latency stats, total tokens, **input/output token and tokens/sec distributions** (avg, min, max, std, p50/p90/p99), and actual RPS.
-- **Token counting** — [tiktoken](https://github.com/openai/tiktoken) with configurable encoding (e.g. `cl100k_base`, `o200k_base`). When the API does not return usage (e.g. streaming without usage in the stream), Flocust falls back to client-side token counts so you still get `input_tokens`, `output_tokens`, and `tokens_per_sec` for every request.
-- **Console dashboard** — After each run, a table shows TTFT, Request Latency, Inter Token Latency, **Input Tokens**, **Output Tokens**, and **Tokens/sec** (each with avg, min, max, p99, p90, p50, std), plus a summary line with total tokens and avg tokens/s. When the API reports prompt cache usage, the dashboard also shows **Prompt cache:** requests with cache hit and total cached tokens.
-- **Prompt caching** — Optional **prompt cache** mode: when **disabled** (default), each request gets a unique prefix so the API does not reuse cached prompts (reproducible load tests). When **enabled** (`--prompt-cache` or `prompt_cache: true` in config), prompts are sent as-is so the API can cache; results and report include `cached_tokens` and aggregated cache stats when the API reports them (e.g. OpenAI `prompt_tokens_details.cached_tokens`).
-- **CLI** — Run with a config file or interactively (terminal prompts); run load test and view report/dashboard.
-- **REST API** — FastAPI server with run endpoint (file upload or prompt generation), report download, and health check.
+**FlotorchEval** (CLI: `flocust`) is a load-testing and evaluation tool for **any** service that exposes an OpenAI-style **chat completions** endpoint (`POST /chat/completions`). It is not limited to the Flotorch ecosystem—use it with **OpenAI**, **Azure OpenAI**, **Flotorch**, or any gateway/proxy that speaks the same API.
 
----
+- **Load test** — Run many concurrent requests with configurable RPS and concurrency; measure latency, throughput, and token usage.
+- **Streaming & non-streaming** — Supports both; when streaming is enabled, reports time-to-first-token (TTFT) and inter-token latency.
+- **Token metrics** — Input/output tokens and tokens-per-second from response headers (e.g. `x-input-tokens`, `x-completion-tokens`) or from the response body `usage` when the API provides it.
+- **CLI and REST API** — Run from the command line (config file or interactive prompts) or via a FastAPI server for automated pipelines.
 
-## Prerequisites
+Outputs: per-request `results.jsonl`, aggregated `report.json`, and a console dashboard with latency and token statistics.
 
-- **Python 3.10+**
-- An **OpenAI-compatible** chat completions endpoint (e.g. OpenAI, Azure OpenAI, or any provider exposing the same API).
-- For TTFT and inter-token metrics, the API must support **streaming** (`stream: true`) and return SSE or JSON chunks.
+**Works with:** OpenAI, Azure OpenAI, Flotorch, and any other service that exposes an OpenAI-compatible `POST /chat/completions` endpoint.
 
 ---
 
 ## Installation
 
-From the project root:
+**Requirements:** Python 3.10+. Any HTTP endpoint that implements the OpenAI chat completions API (e.g. OpenAI, Azure OpenAI, Flotorch, or a custom proxy).
 
 ```bash
 pip install -e .
-```
-
-Or install dependencies only:
-
-```bash
+# or
 pip install -r requirements.txt
 ```
 
-Verify the CLI:
+Verify:
 
 ```bash
 flocust
@@ -52,54 +58,48 @@ python -m flocust.cli.main
 
 ---
 
-## Configuration
+## Quick Start
 
-You can run Flocust in two ways:
+**Option 1 — Config file**
 
-1. **Config file** — Pass a JSON config with `-c`/`--config`. All settings are loaded from the file.
-2. **Interactive (terminal)** — Run `flocust` without `-c`. The CLI prompts for every parameter in the terminal.
+Create a JSON config (see [Configuration](#configuration)) and run:
 
-You **must** choose one: either provide a config file path or run interactively. The CLI does not auto-load `config.json` from the current directory when no option is given.
+```bash
+flocust --config path/to/config.json
+```
+
+**Option 2 — Interactive**
+
+Run without a config; the CLI will prompt for base URL, API key, model, concurrency, requests, prompts file, etc.:
+
+```bash
+flocust
+```
+
+Output is written under `artifacts/<model>-users<N>-rps<R>/` with `results.jsonl`, `report.json`, and a console dashboard.
 
 ---
 
-### Config file (`config.json`)
+## Examples
 
-Use a JSON file to define provider settings, benchmark parameters, and input/report options. Paths in the file are relative to the config file’s directory.
+- **Config-based run:** `flocust -c config.json` — point `base_url` in the config to your endpoint (OpenAI, Azure, Flotorch, or any OpenAI-compatible API).
+- **Interactive run:** `flocust` — you’ll be prompted for base URL, API key, model, concurrency, requests, and prompts file.
+- **API run:** `POST /api/run` with `prompts_file` or `generate_prompts=true` (see [REST API](#rest-api)) — useful for CI or remote runs against any chat completions endpoint.
 
-#### Schema
+---
 
-| Section | Field | Type | Description |
-|--------|--------|------|--------------|
-| **provider** | — | string | Provider identifier (e.g. `"openai"`). Default: `"openai"`. |
-| **provider_settings** | `api_key` | string | API key. Supports `$ENV_VAR` or `env:ENV_VAR` to read from environment. |
-| | `model` | string | Model name (e.g. `gpt-4o-mini`, `flotorch/gemini-flash`). |
-| | `base_url` | string | LLM API base URL without `/chat/completions` (e.g. `https://api.openai.com/v1`). |
-| | `headers` | object | Optional extra HTTP headers. |
-| **bench** | `concurrency` | int | Number of concurrent virtual users (1–10000). |
-| | `requests` | int | Total requests to run when `duration_sec` is 0 (1–1000000). |
-| | `requests_per_second` | float | Target RPS; `0` = max throughput. |
-| | `duration_sec` | float | If &gt; 0, run for this many seconds (overrides `requests`). |
-| | `ramp_up_sec` | float | Stagger worker start over this many seconds. |
-| | `timeout_sec` | int | Per-request timeout in seconds. |
-| | `max_tokens` | int | Max completion tokens per request. |
-| | `stream` | bool | Use streaming for TTFT/inter-token metrics. |
-| | `generate_prompts` | bool | If true, generate prompts via LLM; then `input_file` can be omitted. |
-| | `generate_prompts_count` | int \| null | Number of prompts to generate (1–1000); used when `generate_prompts` is true. |
-| | `prompt_cache` | bool | If true, send prompts as-is so the API can use prompt caching. If false (default), each request gets a unique prefix so no cache hits (reproducible load tests). |
-| **input_file** | — | string | Path to prompts file (JSON or JSONL), relative to config file. Required if `generate_prompts` is false. |
-| **report** | `format` | string | Output format: `"console"` or `"json"`. |
+## Configuration
 
-#### Environment variables in config
+Use a JSON config file when running with `--config`. Set `base_url` to your provider (e.g. `https://api.openai.com/v1`, `https://your-gateway.com/openai/v1`). Paths in the config are relative to the config file directory.
 
-In `api_key`, `base_url`, or `headers` values you can use:
+| Section | Key fields |
+|--------|-------------|
+| **provider_settings** | `api_key`, `model`, `base_url` (supports `$ENV_VAR`) |
+| **bench** | `concurrency`, `requests`, `duration_sec`, `requests_per_second`, `timeout_sec`, `max_tokens`, `stream`, `generate_prompts`, `generate_prompts_count` |
+| **input_file** | Path to prompts file (JSON/JSONL). Required if `generate_prompts` is false. |
+| **report** | `format`: `"console"` or `"json"` |
 
-- `$VAR` — replaced by the value of environment variable `VAR`.
-- `env:VAR` — same as `$VAR`.
-
-Example: `"api_key": "$OPENAI_API_KEY"` or `"api_key": "env:OPENAI_API_KEY"`. If `provider` is `"openai"` and `api_key` is empty, `OPENAI_API_KEY` is used automatically.
-
-#### Example `config.json`
+**Example `config.json`**
 
 ```json
 {
@@ -107,8 +107,7 @@ Example: `"api_key": "$OPENAI_API_KEY"` or `"api_key": "env:OPENAI_API_KEY"`. If
   "provider_settings": {
     "api_key": "$OPENAI_API_KEY",
     "model": "gpt-4o-mini",
-    "base_url": "https://api.openai.com/v1",
-    "headers": {}
+    "base_url": "https://api.openai.com/v1"
   },
   "bench": {
     "concurrency": 10,
@@ -120,118 +119,43 @@ Example: `"api_key": "$OPENAI_API_KEY"` or `"api_key": "env:OPENAI_API_KEY"`. If
     "max_tokens": 1024,
     "stream": true,
     "generate_prompts": false,
-    "generate_prompts_count": null,
-    "prompt_cache": false
+    "generate_prompts_count": null
   },
   "input_file": "prompts.jsonl",
   "report": { "format": "console" }
 }
 ```
 
-- If `duration_sec` is `0`, the run stops after `requests` are completed.
-- If `duration_sec` &gt; 0, the run lasts that many seconds and request count is derived from throughput.
-- If `generate_prompts` is `true`, you can omit `input_file` or leave it empty; set `generate_prompts_count` (1–1000) to control how many prompts are generated.
+- `duration_sec > 0`: run for that many seconds; otherwise the run stops after `requests` are completed.
+- `generate_prompts: true`: prompts are generated via a one-shot LLM call; you can omit `input_file` and set `generate_prompts_count` (1–1000).
 
 ---
 
 ## Running the CLI
 
-### Option A: With a config file
+| Mode | Command |
+|------|--------|
+| With config | `flocust -c config.json` |
+| Interactive | `flocust` (no `-c`) |
 
-Specify the config file explicitly. The CLI loads all settings from it and does not prompt.
-
-```bash
-flocust --config path/to/config.json
-# or
-flocust -c path/to/config.json
-```
-
-If the file is missing, the CLI exits with an error (e.g. `Config file not found`). To enable **prompt caching** (send prompts as-is so the API can cache), pass `--prompt-cache`:
-
-```bash
-flocust -c config.json --prompt-cache
-```
-
-### Option B: Interactive (no config file)
-
-Run without `-c`/`--config`. The CLI prompts for every parameter in the terminal.
-
-```bash
-flocust
-# or
-python -m flocust.cli.main
-```
-
-You will be prompted for:
-
-| Prompt | Description | Example |
-|--------|-------------|---------|
-| Base URL | LLM API base URL (without `/chat/completions`) | `https://api.openai.com/v1` |
-| API key | Authentication key | (your key) |
-| Model name | Model identifier | `gpt-4o-mini` |
-| Concurrency (users) | Number of concurrent virtual users | `10` |
-| Use duration mode? | `y` = run for N seconds; `n` = run until N requests | `n` |
-| Run duration / Number of requests | Seconds or total requests | `100` |
-| Ramp-up time (seconds) | Stagger worker start | `0` |
-| Requests per second | Target RPS (0 = max throughput) | `5.0` |
-| Request timeout (seconds) | Per-request timeout | `60` |
-| Max tokens per completion | Cap per response | `1024` |
-| Stream responses? | Use streaming (TTFT/inter-token) or not | `y` |
-| Enable prompt caching? | `y` = send prompts as-is (API can cache); `n` = unique request per call (default) | `n` |
-| Prompts: (f)ile or (l)lm-generated | File path vs generate via LLM | `f` |
-| Prompts file path | Path to JSON/JSONL prompts (if file chosen) | `prompts.jsonl` |
-
-Output is written under `artifacts/<model>-users<N>-rps<R>/` (e.g. `artifacts/gpt-4o-mini-users10-rps5/`), containing:
-
-- `results.jsonl` — One JSON object per request: latency, TTFT, input_tokens, output_tokens, tokens_per_sec, inter-token latencies (and per-request percentiles), success/error.
-- `report.json` — Aggregated report: latency percentiles, TTFT and inter-token latency stats, total tokens, **input/output token and tokens/sec distributions** (min, max, avg, std, p50/p90/p99), and actual RPS.
-
-A summary and **console dashboard** are printed after the run: a table with TTFT, Request Latency, Inter Token Latency, Input Tokens, Output Tokens, and Tokens/sec (each row: avg, min, max, p99, p90, p50, std), plus a summary line.
+Interactive prompts include: base URL, API key, model, concurrency, duration vs request count, RPS, timeout, max tokens, streaming, prompts source (file or LLM-generated), and prompts file path when using a file.
 
 ---
 
-## Running the FastAPI server
+## REST API
 
-The API exposes a **run** endpoint (multipart form: upload a prompts file **or** set `generate_prompts=true`), a **report download** endpoint, and a **health** endpoint. All errors are handled so that invalid input returns 422 and unexpected failures return 500 with a safe message (details are logged server-side).
-
-### Start the server
-
-From the project root:
+Start the server:
 
 ```bash
 uvicorn flocust.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-With auto-reload (development):
+- **Docs:** `http://localhost:8000/docs`
+- **Health:** `GET /health`
+- **Run load test:** `POST /api/run` (multipart: upload `prompts_file` **or** set `generate_prompts=true`; required: `api_key`, `model`)
+- **Download report:** `GET /api/report?report_id=<id>`
 
-```bash
-uvicorn flocust.api.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-- **Base URL:** `http://localhost:8000`
-- **Interactive docs:** `http://localhost:8000/docs`
-- **OpenAPI JSON:** `http://localhost:8000/openapi.json`
-
-### Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check. Returns `{"status": "ok"}`. |
-| GET | `/` | API info: service name, docs path, OpenAPI path. |
-| POST | `/api/run` | Run a load test. **Multipart form:** either upload a prompts file or set `generate_prompts=true`. Returns summary + `report_id`. |
-| GET | `/api/report?report_id=<id>` | Download the full report (report + all results) as JSON. File is removed after send; IDs expire after 1 hour. |
-
-### POST `/api/run`
-
-You must provide prompts in **exactly one** way:
-
-- **Upload a prompts file** — Attach `prompts_file` (`.json` or `.jsonl`).
-- **Generate prompts** — Set `generate_prompts=true` (optionally `generate_prompts_count`; if omitted or 0, a default is used).
-
-**Required form fields:** `api_key`, `model`  
-**Optional form fields (with defaults):** `base_url`, `concurrency`, `requests_per_second`, `num_requests`, `duration_sec`, `ramp_up_sec`, `use_rps_throttle`, `timeout_sec`, `max_tokens`, `encoding`, `stream`, `generate_prompts`, `generate_prompts_count`
-
-**Example — run with prompts file:**
+**Example**
 
 ```bash
 curl -X POST http://localhost:8000/api/run \
@@ -244,33 +168,17 @@ curl -X POST http://localhost:8000/api/run \
   -F "max_tokens=1024"
 ```
 
-**Example — run with generated prompts:**
+---
 
-```bash
-curl -X POST http://localhost:8000/api/run \
-  -F "base_url=https://api.openai.com/v1" \
-  -F "api_key=YOUR_API_KEY" \
-  -F "model=gpt-4o-mini" \
-  -F "concurrency=2" \
-  -F "num_requests=10" \
-  -F "max_tokens=1024" \
-  -F "generate_prompts=true"
-```
+## Output
 
-**Response:** JSON with a `report` (aggregate metrics) and `report_id`. The full report is written asynchronously; download it with GET `/api/report?report_id=<report_id>`.
+After each run you get:
 
-### Error responses
+- **results.jsonl** — One JSON line per request: `req_id`, `input_prompt`, `output_result`, `latency_ms`, `ttft_ms`, `input_tokens`, `output_tokens`, `tokens_per_sec`, inter-token latencies, `success`, `error`. Token counts are read from response headers (e.g. `x-input-tokens`, `x-completion-tokens`) or from the body `usage` object when the API provides it.
+- **report.json** — Aggregated metrics: latency/TTFT/inter-token percentiles (p50/p90/p95/p99), total and per-request token stats, actual RPS.
+- **Console** — A dashboard table (TTFT, request latency, inter-token latency, input/output tokens, tokens/sec with avg/min/max/percentiles) and a one-line summary.
 
-- **400** — Bad request (e.g. both file and `generate_prompts` provided, or neither).
-- **404** — Report not found or expired for GET `/api/report`.
-- **422** — Validation failed (invalid form values or internal config validation); body includes `detail` with error list.
-- **500** — Internal server error; body contains a safe message; details are logged on the server.
-
-### Download the full report
-
-```bash
-curl -O -J "http://localhost:8000/api/report?report_id=YOUR_REPORT_ID"
-```
+Artifacts are written under `artifacts/<model-slug>-users<N>-rps<R>/`.
 
 ---
 
@@ -279,118 +187,22 @@ curl -O -J "http://localhost:8000/api/report?report_id=YOUR_REPORT_ID"
 ```
 Flocust/
 ├── flocust/
-│   ├── __init__.py
-│   ├── api/                    # FastAPI application
-│   │   ├── constants.py        # API defaults, service name
-│   │   ├── main.py             # FastAPI app, exception handlers, /health, /
-│   │   ├── report_registry.py  # Temp report storage (TTL)
-│   │   ├── routes.py           # POST /api/run, GET /api/report
-│   │   └── schemas.py          # Request/response models
-│   ├── cli/
-│   │   ├── __init__.py
-│   │   └── main.py             # CLI entry (flocust), interactive prompts
-│   ├── common/                 # Shared logic
-│   │   ├── analyzer.py        # compute_report, write_report (incl. token distributions)
-│   │   ├── config.py          # RunConfig, ConfigFile, load_config_from_file
-│   │   ├── dashboard.py       # Console table (TTFT, latency, inter-token, tokens, tokens/sec)
-│   │   ├── generator.py       # Synthetic prompt generation (lorem/code)
-│   │   ├── loader.py          # load_prompts (JSON/JSONL)
-│   │   ├── models.py          # RequestResult, ReportCard (incl. token distribution fields)
-│   │   ├── runner.py          # Locust user, run_experiment(), token fallback for streaming
-│   │   ├── tokenizer.py       # tiktoken count_tokens, encoding cache
-│   │   └── utils.py           # percentile, etc.
-│   └── config.sample.json     # Example config
-├── config.json                # Optional local config (git-ignored if desired)
-├── prompts.jsonl              # Example prompts
+│   ├── api/          # FastAPI: /health, POST /api/run, GET /api/report
+│   ├── cli/          # CLI entry (flocust), interactive prompts
+│   ├── common/       # config, loader, runner, analyzer, dashboard, models
+│   └── config.sample.json
+├── prompts.jsonl
 ├── pyproject.toml
 ├── requirements.txt
-├── TECHNICAL_OVERVIEW.md      # Latency/token measurement, results writing, workflow
+├── TECHNICAL_OVERVIEW.md
 └── README.md
 ```
 
 ---
 
-## Output formats
+## Contributing
 
-### `results.jsonl`
-
-One JSON object per line, one line per request. Fields include:
-
-- **req_id**, **input_prompt**, **output_result** — Request id, prompt, and model response.
-- **latency_ms**, **ttft_ms** — Total latency and time to first token (TTFT; null when not streaming).
-- **input_tokens**, **output_tokens**, **tokens_per_sec** — Token counts and throughput per request (from API usage when available; otherwise from tiktoken so streaming runs still get values).
-- **cached_tokens** — Input tokens served from the API’s prompt cache (e.g. OpenAI `prompt_tokens_details.cached_tokens`); present when the API reports it.
-- **inter_token_latencies**, **avg_inter_token_latency**, **p50/p90/p95_inter_token_latency** — Inter-token latency stats (when streaming).
-- **success**, **error** — Request success and error message if failed.
-
-Example (streaming):
-
-```json
-{"req_id":"abc123","input_prompt":"What is 2+2?","output_result":"4","latency_ms":450.2,"ttft_ms":120.1,"input_tokens":8,"output_tokens":2,"tokens_per_sec":22.5,"success":true,"error":null,"inter_token_latencies":[12.1,8.3],"avg_inter_token_latency":10.2,"p50_inter_token_latency":10.0,"p90_inter_token_latency":12.0,"p95_inter_token_latency":12.5}
-```
-
-### `report.json` (report card)
-
-Aggregated metrics for the run. Includes:
-
-- **Latency** — average, min, max, p50/p90/p95/p99, std.
-- **TTFT** — average, min, max, p50/p90/p99, std (when streaming).
-- **Inter-token latency** — average, min, max, p50/p90/p95, std (when streaming).
-- **Total tokens** — total_input_tokens, total_output_tokens, total_tokens.
-- **Token distributions (per request)** — input_tokens_avg/min/max/std/p50/p90/p99, output_tokens_*, average_tokens_per_sec, tokens_per_sec_min/max/std/p50/p90/p99.
-- **Prompt cache** (when API reports cached tokens) — total_cached_tokens, requests_with_cache_hit.
-- **requests_per_second_actual**, **result_file**, **notes**.
-
-Example (abbreviated):
-
-```json
-{
-  "experiment_id": "model-users10-rps5",
-  "total_requests": 100,
-  "successful_requests": 98,
-  "failed_requests": 2,
-  "average_latency_ms": 420.5,
-  "latency_p50_ms": 380.0,
-  "latency_p90_ms": 620.0,
-  "latency_p95_ms": 710.0,
-  "latency_p99_ms": 890.0,
-  "ttft_available": true,
-  "average_ttft_ms": 110.2,
-  "inter_token_latency_available": true,
-  "average_inter_token_latency_ms": 8.5,
-  "total_input_tokens": 1200,
-  "total_output_tokens": 450,
-  "total_tokens": 1650,
-  "input_tokens_avg": 12.0,
-  "input_tokens_min": 8,
-  "input_tokens_max": 22,
-  "output_tokens_avg": 4.5,
-  "output_tokens_min": 2,
-  "output_tokens_max": 15,
-  "average_tokens_per_sec": 25.3,
-  "tokens_per_sec_min": 10.2,
-  "tokens_per_sec_max": 45.0,
-  "requests_per_second_actual": 4.8,
-  "result_file": "results.jsonl",
-  "notes": null
-}
-```
-
-When `stream=false`, TTFT and inter-token fields may be omitted or null; only end-to-end latency is reported. Token counts and tokens_per_sec are still reported (from API usage or tiktoken fallback).
-
----
-
-## Documentation
-
-For implementation details (how latency, TTFT, and inter-token latency are measured; token counting and fallback when the API does not return usage; results writing and report aggregation; ramp-up and load control), see **[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md)**.
-
----
-
-## Requirements
-
-- Python 3.10+
-- OpenAI-compatible chat completions endpoint
-- For TTFT and inter-token metrics: API must support `stream: true` and return SSE or JSON stream chunks
+Contributions are welcome. Open an issue or submit a pull request.
 
 ---
 
