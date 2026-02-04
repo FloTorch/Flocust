@@ -9,7 +9,7 @@
   <a href="https://pypi.org/project/flocust/"><img src="https://img.shields.io/badge/PyPI-0.1.0-3776AB?logo=pypi&logoColor=white" alt="PyPI version" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-3776AB?logo=python&logoColor=white" alt="Python versions" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
-  <a href="TECHNICAL_OVERVIEW.md"><img src="https://img.shields.io/badge/Documentation-technical%20overview-green" alt="Documentation" /></a>
+
   <a href="https://flotorch.cloud"><img src="https://img.shields.io/badge/Website-flotorch.cloud-blue" alt="Website" /></a>
 </p>
 
