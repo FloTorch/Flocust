@@ -15,8 +15,8 @@ class RequestResult(BaseModel):
     output_result: str = Field(default="", description="Model response content")
     latency_ms: float = Field(..., ge=0, description="Total request latency in milliseconds")
     ttft_ms: float | None = Field(default=None, description="Time to first token in milliseconds")
-    input_tokens: int = Field(..., ge=0, description="Input token count (from LLM usage)")
-    output_tokens: int = Field(..., ge=0, description="Output token count (from LLM usage)")
+    input_tokens: int = Field(default=0, ge=0, description="Input token count (from response headers/usage; 0 if not reported)")
+    output_tokens: int = Field(default=0, ge=0, description="Output token count (from response headers/usage; 0 if not reported)")
     cached_tokens: int | None = Field(
         default=None,
         ge=0,

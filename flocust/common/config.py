@@ -1,6 +1,7 @@
 """Configuration models for LLM load test runs."""
 
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -46,12 +47,17 @@ class BenchSettings(BaseModel):
     timeout_sec: int = Field(default=60, ge=1, le=300)
     max_tokens: int = Field(default=1024, ge=1, le=128_000)
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
+    num_workers: int = Field(
+        default=1, ge=1, le=64,
+        description="Number of parallel Locust worker processes to hit target RPS (default 1)",
+    )
     prompt_cache: bool = Field(
         default=False,
         description="Enable OpenAI-style prompt caching (default: disabled for reproducible load tests)",
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
+    prompts_path: str | None = Field(default=None, description="Path to prompts file (overrides root input_file when set)")
 
 
 class ReportSettings(BaseModel):
@@ -107,7 +113,7 @@ class RunConfig(BaseModel):
     base_url: str = Field(..., description="LLM API base URL")
     api_key: str = Field(..., description="API key for authentication")
     model: str = Field(..., description="Model name")
-    concurrency: int = Field(ge=1, le=10_000, description="Number of concurrent users")
+    concurrency: int = Field(ge=1, le=100_000, description="Number of concurrent users (spawned to achieve target RPS)")
     requests_per_second: float = Field(
         ge=0.1, le=10_000.0,
         description="Target RPS when use_rps_throttle is True",
@@ -128,6 +134,10 @@ class RunConfig(BaseModel):
     use_rps_throttle: bool = Field(
         default=False,
         description="When False, max throughput; when True, throttle to requests_per_second",
+    )
+    num_workers: int = Field(
+        default=1, ge=1, le=64,
+        description="Number of parallel Locust worker processes to achieve target RPS",
     )
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
     prompt_cache: bool = Field(
@@ -190,32 +200,37 @@ def load_config_from_file(path: Path) -> RunConfig:
     bench = cfg.bench
     base = path.parent
     slug = re.sub(r"[^\w\-.]", "-", ps.model.replace("/", "-").strip()) or "model"
-    rps = bench.requests_per_second if bench.requests_per_second > 0 else bench.concurrency
-    out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(rps)}"
+    # Concurrency = target RPS (max req/s to achieve). Spawn enough users so throughput reaches target (no throttle).
+    target_rps = bench.concurrency
+    num_requests = bench.requests
+    # Assume up to 40s LLM latency; spawn users so RPS = users/latency >= target (do not cap by num_requests).
+    assumed_latency_sec = 40.0
+    num_users = max(target_rps, math.ceil(target_rps * assumed_latency_sec))
+    out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(target_rps)}"
 
-    # Resolve prompts path
-    input_file_resolved = cfg.input_file.strip()
-    if not input_file_resolved and not bench.generate_prompts:
-        raise ValueError("input_file is required when generate_prompts is false")
+    # Resolve prompts path: bench.prompts_path overrides root input_file when set
+    prompts_source = (bench.prompts_path or "").strip() or cfg.input_file.strip()
+    if not prompts_source and not bench.generate_prompts:
+        raise ValueError("input_file or bench.prompts_path is required when generate_prompts is false")
 
-    if input_file_resolved:
-        input_path = Path(input_file_resolved)
+    if prompts_source:
+        input_path = Path(prompts_source)
         if not input_path.is_absolute():
             input_path = (path.parent / input_path).resolve()
     else:
-        # When generate_prompts is true and no input_file, we'll generate to output_dir
+        # When generate_prompts is true and no input_file, we'll generate to temp in runner
         input_path = out_dir / "generated_prompts.json"
 
-    # Use RPS throttle if requests_per_second > 0, otherwise max throughput
-    use_rps_throttle = bench.requests_per_second > 0
-    rps = bench.requests_per_second if use_rps_throttle else float(bench.concurrency)
+    # Max throughput: no throttle (constant(0)); users run as fast as API allows. Single process only.
+    use_rps_throttle = False
+    num_workers = 1
 
     return RunConfig(
         base_url=normalize_base_url(ps.base_url),
         api_key=ps.api_key,
         model=ps.model,
-        concurrency=bench.concurrency,
-        requests_per_second=rps,
+        concurrency=num_users,
+        requests_per_second=float(target_rps),
         max_tokens=bench.max_tokens,
         prompts_path=input_path,
         output_dir=out_dir,
@@ -224,6 +239,7 @@ def load_config_from_file(path: Path) -> RunConfig:
         duration_sec=bench.duration_sec,
         ramp_up_sec=bench.ramp_up_sec,
         use_rps_throttle=use_rps_throttle,
+        num_workers=num_workers,
         stream=bench.stream,
         prompt_cache=bench.prompt_cache,
         generate_prompts=bench.generate_prompts,
