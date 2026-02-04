@@ -52,6 +52,10 @@ class BenchSettings(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
+    generate_prompts_from_file: bool = Field(default=False, description="Generate prompts from source file (no LLM call). Use input_file to specify custom source file, or defaults to default text file")
+    prompt_mean_input_tokens: int | None = Field(default=None, ge=1, description="Mean input tokens for generated prompts")
+    prompt_stddev_input_tokens: int | None = Field(default=None, ge=0, description="Stddev input tokens for generated prompts")
+    prompt_mean_output_tokens: int | None = Field(default=None, ge=1, description="Mean output tokens (used in prompt instruction)")
 
 
 class ReportSettings(BaseModel):
@@ -136,6 +140,10 @@ class RunConfig(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
+    generate_prompts_from_file: bool = Field(default=False, description="Generate prompts from source file (no LLM call). Use input_file to specify custom source file, or defaults to default text file")
+    prompt_mean_input_tokens: int | None = Field(default=None, ge=1, description="Mean input tokens for generated prompts")
+    prompt_stddev_input_tokens: int | None = Field(default=None, ge=0, description="Stddev input tokens for generated prompts")
+    prompt_mean_output_tokens: int | None = Field(default=None, ge=1, description="Mean output tokens (used in prompt instruction)")
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(
         default="cl100k_base",
         description="Tiktoken encoding for token counting",
@@ -150,8 +158,17 @@ class RunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_prompts_path_unless_generate(self) -> "RunConfig":
-        if not self.generate_prompts and self.prompts_path is None:
-            raise ValueError("prompts_path is required when generate_prompts is False")
+        if not self.generate_prompts and not self.generate_prompts_from_file and self.prompts_path is None:
+            raise ValueError("prompts_path is required when generate_prompts and generate_prompts_from_file are False")
+        if self.generate_prompts and self.generate_prompts_from_file:
+            raise ValueError("Cannot use both generate_prompts and generate_prompts_from_file")
+        if self.generate_prompts_from_file:
+            if self.prompt_mean_input_tokens is None:
+                raise ValueError("prompt_mean_input_tokens is required when generate_prompts_from_file is True")
+            if self.prompt_stddev_input_tokens is None:
+                raise ValueError("prompt_stddev_input_tokens is required when generate_prompts_from_file is True")
+            if self.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_output_tokens is required when generate_prompts_from_file is True")
         return self
 
     @property
@@ -193,20 +210,25 @@ def load_config_from_file(path: Path) -> RunConfig:
     rps = bench.requests_per_second if bench.requests_per_second > 0 else bench.concurrency
     out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(rps)}"
 
-    # Resolve prompts path
     input_file_resolved = cfg.input_file.strip()
-    if not input_file_resolved and not bench.generate_prompts:
-        raise ValueError("input_file is required when generate_prompts is false")
+    if not input_file_resolved and not bench.generate_prompts and not bench.generate_prompts_from_file:
+        raise ValueError("input_file is required when generate_prompts and generate_prompts_from_file are false")
 
-    if input_file_resolved:
+    if bench.generate_prompts_from_file:
+        if input_file_resolved:
+            source_file_path = Path(input_file_resolved)
+            if not source_file_path.is_absolute():
+                source_file_path = (path.parent / source_file_path).resolve()
+            input_path = source_file_path
+        else:
+            input_path = None
+    elif input_file_resolved:
         input_path = Path(input_file_resolved)
         if not input_path.is_absolute():
             input_path = (path.parent / input_path).resolve()
     else:
-        # When generate_prompts is true and no input_file, we'll generate to output_dir
         input_path = out_dir / "generated_prompts.json"
 
-    # Use RPS throttle if requests_per_second > 0, otherwise max throughput
     use_rps_throttle = bench.requests_per_second > 0
     rps = bench.requests_per_second if use_rps_throttle else float(bench.concurrency)
 
@@ -228,5 +250,9 @@ def load_config_from_file(path: Path) -> RunConfig:
         prompt_cache=bench.prompt_cache,
         generate_prompts=bench.generate_prompts,
         generate_prompts_count=bench.generate_prompts_count,
+        generate_prompts_from_file=bench.generate_prompts_from_file,
+        prompt_mean_input_tokens=bench.prompt_mean_input_tokens,
+        prompt_stddev_input_tokens=bench.prompt_stddev_input_tokens,
+        prompt_mean_output_tokens=bench.prompt_mean_output_tokens,
         encoding="cl100k_base",
     )

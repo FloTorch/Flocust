@@ -52,6 +52,10 @@ def _build_config(
     stream: bool,
     generate_prompts: bool,
     generate_prompts_count: int | None,
+    generate_prompts_from_file: bool = False,
+    prompt_mean_input_tokens: int | None = None,
+    prompt_stddev_input_tokens: int | None = None,
+    prompt_mean_output_tokens: int | None = None,
 ) -> RunConfig:
     """Build RunConfig from API form parameters."""
     return RunConfig(
@@ -72,6 +76,10 @@ def _build_config(
         stream=stream,
         generate_prompts=generate_prompts,
         generate_prompts_count=generate_prompts_count,
+        generate_prompts_from_file=generate_prompts_from_file,
+        prompt_mean_input_tokens=prompt_mean_input_tokens,
+        prompt_stddev_input_tokens=prompt_stddev_input_tokens,
+        prompt_mean_output_tokens=prompt_mean_output_tokens,
     )
 
 
@@ -160,6 +168,10 @@ async def run_experiment_endpoint(
     stream: bool = Form(True, description="Stream for TTFT/inter-token metrics"),
     generate_prompts: bool = Form(False, description="Generate prompts via LLM"),
     generate_prompts_count: int | None = Form(None, description="Number of prompts to generate"),
+    generate_prompts_from_file: bool = Form(False, description="Generate prompts from source file (no LLM call). Use config.json with input_file for custom source file, or defaults to default text file."),
+    prompt_mean_input_tokens: int | None = Form(None, ge=1, description="Mean input tokens for generated prompts"),
+    prompt_stddev_input_tokens: int | None = Form(None, ge=0, description="Stddev input tokens for generated prompts"),
+    prompt_mean_output_tokens: int | None = Form(None, ge=1, description="Mean output tokens for generated prompts"),
 ) -> RunExperimentResponse:
     """
     Run an LLM load test.
@@ -167,6 +179,7 @@ async def run_experiment_endpoint(
     Provide prompts in one way:
     - Upload a file: attach `prompts_file` (.json or .jsonl).
     - Or set `generate_prompts=true` (optionally `generate_prompts_count`).
+    - Or set `generate_prompts_from_file=true` with token parameters (defaults to default text file).
 
     duration_sec > 0: run for N seconds; else run until num_requests.
     use_rps_throttle=true: throttle to requests_per_second; false: max throughput.
@@ -175,16 +188,27 @@ async def run_experiment_endpoint(
     asynchronously; use GET /api/report?report_id={report_id} to download.
     """
     has_file = prompts_file is not None and (prompts_file.filename or "").strip() != ""
-    if has_file and generate_prompts:
+    if has_file and (generate_prompts or generate_prompts_from_file):
         raise HTTPException(
             status_code=400,
-            detail="Provide either prompts_file or generate_prompts=true, not both.",
+            detail="Provide either prompts_file, generate_prompts=true, or generate_prompts_from_file=true, not multiple.",
         )
-    if not has_file and not generate_prompts:
+    if not has_file and not generate_prompts and not generate_prompts_from_file:
         raise HTTPException(
             status_code=400,
-            detail="Provide prompts_file (upload) or set generate_prompts=true.",
+            detail="Provide prompts_file (upload), set generate_prompts=true, or set generate_prompts_from_file=true.",
         )
+    if generate_prompts and generate_prompts_from_file:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot use both generate_prompts and generate_prompts_from_file.",
+        )
+    if generate_prompts_from_file:
+        if prompt_mean_input_tokens is None or prompt_stddev_input_tokens is None or prompt_mean_output_tokens is None:
+            raise HTTPException(
+                status_code=400,
+                detail="prompt_mean_input_tokens, prompt_stddev_input_tokens, and prompt_mean_output_tokens are required when generate_prompts_from_file=true.",
+            )
 
     run_id = uuid.uuid4().hex[:8]
     temp_dir = Path(tempfile.mkdtemp(prefix="flocust_"))
@@ -225,6 +249,39 @@ async def run_experiment_endpoint(
                 stream=stream,
                 generate_prompts=False,
                 generate_prompts_count=None,
+                generate_prompts_from_file=False,
+                prompt_mean_input_tokens=None,
+                prompt_stddev_input_tokens=None,
+                prompt_mean_output_tokens=None,
+            )
+        elif generate_prompts_from_file:
+            # When generate_prompts_from_file=True, count must be None or 1–1000
+            count = generate_prompts_count
+            if count is None or count < 1:
+                count = max(1, min(1000, num_requests // 10))
+            # API always defaults to default text file (use config.json with input_file for custom source)
+            config = _build_config(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                concurrency=concurrency,
+                requests_per_second=requests_per_second,
+                num_requests=num_requests,
+                max_tokens=max_tokens,
+                timeout_sec=timeout_sec,
+                duration_sec=duration_sec,
+                ramp_up_sec=ramp_up_sec,
+                use_rps_throttle=use_rps_throttle,
+                prompts_path=None,  # Will default to default text file in generator
+                output_dir=temp_dir,
+                encoding=encoding_lit,
+                stream=stream,
+                generate_prompts=False,
+                generate_prompts_count=count,
+                generate_prompts_from_file=True,
+                prompt_mean_input_tokens=prompt_mean_input_tokens,
+                prompt_stddev_input_tokens=prompt_stddev_input_tokens,
+                prompt_mean_output_tokens=prompt_mean_output_tokens,
             )
         else:
             # When generate_prompts=True, count must be None or 1–1000 (RunConfig rejects 0)
@@ -249,6 +306,10 @@ async def run_experiment_endpoint(
                 stream=stream,
                 generate_prompts=True,
                 generate_prompts_count=count,
+                generate_prompts_from_file=False,
+                prompt_mean_input_tokens=None,
+                prompt_stddev_input_tokens=None,
+                prompt_mean_output_tokens=None,
             )
         return _run_and_prepare_response(config, run_id, background_tasks)
     finally:

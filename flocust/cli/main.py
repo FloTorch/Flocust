@@ -138,10 +138,14 @@ def collect_config_from_cli() -> RunConfig:
     stream = _prompt_bool("Stream responses (TTFT/inter-token)? (y/n)", default=True)
     prompt_cache = _prompt_bool("Enable prompt caching (y/n)? (n = unique request per call)", default=False)
 
-    generate_type = _prompt("Prompts: (f)ile, (l)lm-generated", "f").lower().strip()
+    generate_type = _prompt("Prompts: (f)ile, (l)lm-generated, (s)ource-file", "f").lower().strip()
     prompts_path: Path | None = None
     generate_prompts = False
     generate_prompts_count: int | None = None
+    generate_prompts_from_file = False
+    prompt_mean_input_tokens: int | None = None
+    prompt_stddev_input_tokens: int | None = None
+    prompt_mean_output_tokens: int | None = None
 
     if generate_type in ("l", "llm-generated"):
         generate_prompts = True
@@ -156,6 +160,22 @@ def collect_config_from_cli() -> RunConfig:
                 generate_prompts_count = auto_count
         else:
             generate_prompts_count = auto_count
+    elif generate_type in ("s", "source-file", "sonnet"):
+        generate_prompts_from_file = True
+        auto_count = max(1, num_requests // 10)
+        raw = _prompt(
+            "Number of prompts to generate (blank = auto)", str(auto_count)
+        ).strip()
+        if raw:
+            try:
+                generate_prompts_count = min(1000, max(1, int(raw)))
+            except ValueError:
+                generate_prompts_count = auto_count
+        else:
+            generate_prompts_count = auto_count
+        prompt_mean_input_tokens = _prompt_int("Mean input tokens", 550, 1, 10000)
+        prompt_stddev_input_tokens = _prompt_int("Stddev input tokens", 250, 0, 5000)
+        prompt_mean_output_tokens = _prompt_int("Mean output tokens", 150, 1, 10000)
     else:
         prompts_path = Path(
             _prompt("Prompts file path", str(DEFAULT_PROMPTS_PATH))
@@ -186,6 +206,10 @@ def collect_config_from_cli() -> RunConfig:
         prompt_cache=prompt_cache,
         generate_prompts=generate_prompts,
         generate_prompts_count=generate_prompts_count,
+        generate_prompts_from_file=generate_prompts_from_file,
+        prompt_mean_input_tokens=prompt_mean_input_tokens,
+        prompt_stddev_input_tokens=prompt_stddev_input_tokens,
+        prompt_mean_output_tokens=prompt_mean_output_tokens,
     )
 
 

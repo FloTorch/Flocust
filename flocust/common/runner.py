@@ -19,6 +19,7 @@ from locust.env import Environment
 from locust.log import setup_logging
 
 from flocust.common.config import RunConfig
+from flocust.common.generator import generate_prompts_from_file
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
 from flocust.common.utils import percentile
@@ -542,6 +543,7 @@ def run_experiment(
     Run a single load test experiment using programmatic Locust API.
     Runs at target RPS with given concurrency until num_requests are completed.
     When generate_prompts=True, generates prompts via one LLM call first.
+    When generate_prompts_from_file=True, generates prompts from source file (no LLM call).
     Writes result.jsonl and returns (results, result_path, output_dir, duration_seconds).
     """
     # Create isolated runner instance
@@ -559,7 +561,36 @@ def run_experiment(
         prompts_list = _generate_prompts_via_llm(config, count)
         generated_prompts_temp_dir = Path(tempfile.mkdtemp(prefix="flocust_prompts_"))
         prompts_path = generated_prompts_temp_dir / "prompts.jsonl"
-        prompts_path.write_text("\n".join(prompts_list), encoding="utf-8")
+        # Write as JSONL with each prompt as a JSON object to preserve newlines
+        with open(prompts_path, "w", encoding="utf-8") as f:
+            for prompt in prompts_list:
+                json.dump({"prompt": prompt}, f, ensure_ascii=False)
+                f.write("\n")
+        config = config.model_copy(update={"prompts_path": prompts_path})
+    elif config.generate_prompts_from_file:
+        # Generate prompts from source file (no LLM call)
+        count = config.generate_prompts_count
+        if count is None:
+            count = max(
+                GENERATE_PROMPTS_MIN,
+                min(GENERATE_PROMPTS_MAX, int(config.num_requests * GENERATE_PROMPTS_DEFAULT_PERCENT)),
+            )
+        count = max(GENERATE_PROMPTS_MIN, min(GENERATE_PROMPTS_MAX, count))
+        source_file = config.prompts_path if config.prompts_path and config.prompts_path.exists() else None
+        prompts_list = generate_prompts_from_file(
+            count=count,
+            mean_input_tokens=config.prompt_mean_input_tokens or 550,
+            stddev_input_tokens=config.prompt_stddev_input_tokens or 250,
+            mean_output_tokens=config.prompt_mean_output_tokens or 150,
+            source_file_path=source_file,  # Custom source file from input_file config, or None for default text file
+        )
+        generated_prompts_temp_dir = Path(tempfile.mkdtemp(prefix="flocust_prompts_"))
+        prompts_path = generated_prompts_temp_dir / "prompts.jsonl"
+        # Write as JSONL with each prompt as a JSON object to preserve newlines
+        with open(prompts_path, "w", encoding="utf-8") as f:
+            for prompt in prompts_list:
+                json.dump({"prompt": prompt}, f, ensure_ascii=False)
+                f.write("\n")
         config = config.model_copy(update={"prompts_path": prompts_path})
 
     prompts_path = Path(config.prompts_path)
