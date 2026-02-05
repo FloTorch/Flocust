@@ -219,13 +219,25 @@ def load_config_from_file(path: Path) -> RunConfig:
             source_file_path = Path(input_file_resolved)
             if not source_file_path.is_absolute():
                 source_file_path = (path.parent / source_file_path).resolve()
+            file_ext = source_file_path.suffix.lower()
+            if file_ext not in (".txt", ""):
+                raise ValueError(f"input_file must be a .txt file when generate_prompts_from_file is true, got: {source_file_path}")
+            if bench.prompt_mean_input_tokens is None or bench.prompt_stddev_input_tokens is None or bench.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_input_tokens, prompt_stddev_input_tokens, and prompt_mean_output_tokens are required when generate_prompts_from_file is true")
             input_path = source_file_path
         else:
             input_path = None
+            if bench.prompt_mean_input_tokens is None or bench.prompt_stddev_input_tokens is None or bench.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_input_tokens, prompt_stddev_input_tokens, and prompt_mean_output_tokens are required when generate_prompts_from_file is true")
     elif input_file_resolved:
         input_path = Path(input_file_resolved)
         if not input_path.is_absolute():
             input_path = (path.parent / input_path).resolve()
+        file_ext = input_path.suffix.lower()
+        if file_ext in (".jsonl", ".json"):
+            pass
+        elif file_ext == ".txt":
+            raise ValueError("input_file with .txt extension requires generate_prompts_from_file=true. For existing prompts file, use .jsonl or .json")
     else:
         input_path = out_dir / "generated_prompts.json"
 

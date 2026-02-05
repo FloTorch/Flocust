@@ -162,6 +162,21 @@ def collect_config_from_cli() -> RunConfig:
             generate_prompts_count = auto_count
     elif generate_type in ("s", "source-file", "sonnet"):
         generate_prompts_from_file = True
+        source_file_input = _prompt(
+            "Source text file path (.txt) (blank = use default sonnet.txt)", ""
+        ).strip()
+        if source_file_input:
+            source_file_path = Path(source_file_input).resolve()
+            if not source_file_path.exists():
+                print(f"  Error: Source file not found: {source_file_path}")
+                print("  Please provide a valid .txt file path.")
+                sys.exit(1)
+            if source_file_path.suffix.lower() != ".txt":
+                print(f"  Error: Source file must be a .txt file, got: {source_file_path.suffix}")
+                sys.exit(1)
+            prompts_path = source_file_path
+        else:
+            prompts_path = None
         auto_count = max(1, num_requests // 10)
         raw = _prompt(
             "Number of prompts to generate (blank = auto)", str(auto_count)

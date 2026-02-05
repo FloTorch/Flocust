@@ -168,7 +168,8 @@ async def run_experiment_endpoint(
     stream: bool = Form(True, description="Stream for TTFT/inter-token metrics"),
     generate_prompts: bool = Form(False, description="Generate prompts via LLM"),
     generate_prompts_count: int | None = Form(None, description="Number of prompts to generate"),
-    generate_prompts_from_file: bool = Form(False, description="Generate prompts from source file (no LLM call). Use config.json with input_file for custom source file, or defaults to default text file."),
+    generate_prompts_from_file: bool = Form(False, description="Generate prompts from source file (no LLM call). Defaults to default text file. Upload source_file to specify custom .txt file."),
+    source_file: UploadFile | None = File(default=None, description="Source text file (.txt) for file-based prompt generation. If not provided, uses default sonnet.txt. Only used when generate_prompts_from_file=true."),
     prompt_mean_input_tokens: int | None = Form(None, ge=1, description="Mean input tokens for generated prompts"),
     prompt_stddev_input_tokens: int | None = Form(None, ge=0, description="Stddev input tokens for generated prompts"),
     prompt_mean_output_tokens: int | None = Form(None, ge=1, description="Mean output tokens for generated prompts"),
@@ -179,7 +180,7 @@ async def run_experiment_endpoint(
     Provide prompts in one way:
     - Upload a file: attach `prompts_file` (.json or .jsonl).
     - Or set `generate_prompts=true` (optionally `generate_prompts_count`).
-    - Or set `generate_prompts_from_file=true` with token parameters (defaults to default text file).
+    - Or set `generate_prompts_from_file=true` with token parameters. Upload `source_file` (.txt) for custom source, or leave blank to use default sonnet.txt.
 
     duration_sec > 0: run for N seconds; else run until num_requests.
     use_rps_throttle=true: throttle to requests_per_second; false: max throughput.
@@ -259,7 +260,20 @@ async def run_experiment_endpoint(
             count = generate_prompts_count
             if count is None or count < 1:
                 count = max(1, min(1000, num_requests // 10))
-            # API always defaults to default text file (use config.json with input_file for custom source)
+            # Handle source file upload
+            source_path: Path | None = None
+            if source_file and (source_file.filename or "").strip():
+                suffix = Path(source_file.filename or "").suffix.lower()
+                if suffix != ".txt":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Source file must be a .txt file, got {suffix!r}.",
+                    )
+                content = await source_file.read()
+                if not content or not content.strip():
+                    raise HTTPException(status_code=400, detail="Source file is empty.")
+                source_path = temp_dir / "source.txt"
+                source_path.write_bytes(content)
             config = _build_config(
                 base_url=base_url,
                 api_key=api_key,
@@ -272,7 +286,7 @@ async def run_experiment_endpoint(
                 duration_sec=duration_sec,
                 ramp_up_sec=ramp_up_sec,
                 use_rps_throttle=use_rps_throttle,
-                prompts_path=None,  # Will default to default text file in generator
+                prompts_path=source_path,  # Custom source file or None for default text file
                 output_dir=temp_dir,
                 encoding=encoding_lit,
                 stream=stream,
