@@ -1,6 +1,7 @@
 """Locust-based LLM load test runner with isolated state management."""
 
 import json
+import math
 import random
 import shutil
 import sys
@@ -10,11 +11,11 @@ import time
 import uuid
 from io import StringIO
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import gevent
 import httpx
-from locust import HttpUser, constant, constant_throughput, events, task
+from locust import HttpUser, constant, events, task
 from locust.env import Environment
 from locust.log import setup_logging
 
@@ -32,7 +33,7 @@ GENERATE_PROMPTS_MAX = 500
 RESULTS_FILENAME = "results.jsonl"
 FLUSH_EVERY_LINES = 10
 QUEUE_POLL_TIMEOUT = 0.1
-STOP_POLL_INTERVAL = 0.2
+STOP_POLL_INTERVAL = 0.1
 
 def _usage_from_headers(headers) -> tuple[int, int]:
     """Extract input_tokens and output_tokens from response headers (e.g. x-input-tokens, x-completion-tokens)."""
@@ -476,17 +477,22 @@ def _run_experiment_programmatic(
     test_runner.config = config
     test_runner.request_limiter.reset(config.num_requests)
 
+    # Max throughput: use all configured users; no throttle so we run at system limit.
+    effective_concurrency = config.concurrency
+
     # Suppress Locust logging so only our single progress bar is visible
     setup_logging(loglevel="CRITICAL")
     env = Environment(user_classes=[LLMUser])
 
+    # Timeout: (connect_sec, read_sec) so long LLM responses are not cut off
+    timeout_tuple = (10, config.timeout_sec) if config.timeout_sec > 0 else (10, 120)
     env.parsed_options = type("Options", (), {
         "api_key": config.api_key,
         "model": config.model,
         "max_tokens": config.max_tokens,
         "prompts_path": str(config.prompts_path),
         "encoding": config.encoding,
-        "timeout": config.timeout_sec,
+        "timeout": timeout_tuple,
         "stream": config.stream,
         "prompt_cache": getattr(config, "prompt_cache", False),
     })()
@@ -496,21 +502,19 @@ def _run_experiment_programmatic(
 
     env.host = config.base_url.rstrip("/")
 
-    if getattr(config, "use_rps_throttle", False):
-        LLMUser.wait_time = constant_throughput(config.requests_per_second)
-    else:
-        LLMUser.wait_time = constant(0)
+    # No wait between tasks: max req/s (each user runs again as soon as request completes)
+    LLMUser.wait_time = constant(0)
 
     events.request.add_listener(_on_request)
 
     runner = env.create_local_runner()
 
-    # Ramp-up: stagger spawn over ramp_up_sec when set
+    # Spawn all users as fast as possible so we hit target throughput from the first second.
     if getattr(config, "ramp_up_sec", 0) and config.ramp_up_sec > 0:
-        spawn_rate = max(1, int(config.concurrency / config.ramp_up_sec))
+        spawn_rate = max(1, int(effective_concurrency / config.ramp_up_sec))
     else:
-        spawn_rate = config.concurrency
-    runner.start(config.concurrency, spawn_rate=spawn_rate)
+        spawn_rate = min(15000, max(effective_concurrency, 1000))
+    runner.start(effective_concurrency, spawn_rate=spawn_rate)
 
     start_time = time.perf_counter()
     use_duration = getattr(config, "duration_sec", 0) and config.duration_sec > 0
@@ -558,7 +562,11 @@ def run_experiment(
                 min(GENERATE_PROMPTS_MAX, int(config.num_requests * GENERATE_PROMPTS_DEFAULT_PERCENT)),
             )
         count = max(GENERATE_PROMPTS_MIN, min(GENERATE_PROMPTS_MAX, count))
+        sys.stdout.write("Generating prompts via LLM...\n")
+        sys.stdout.flush()
         prompts_list = _generate_prompts_via_llm(config, count)
+        sys.stdout.write(f"Prompts generated: {len(prompts_list)}\n")
+        sys.stdout.flush()
         generated_prompts_temp_dir = Path(tempfile.mkdtemp(prefix="flocust_prompts_"))
         prompts_path = generated_prompts_temp_dir / "prompts.jsonl"
         # Write as JSONL with each prompt as a JSON object to preserve newlines
@@ -601,6 +609,7 @@ def run_experiment(
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / RESULTS_FILENAME
 
+    # Single-process path (multiprocessing removed for reliability)
     # Redirect stdout/stderr so only progress line is visible
     real_stdout = sys.stdout
     real_stderr = sys.stderr

@@ -254,12 +254,12 @@ def load_config_from_file(path: Path) -> RunConfig:
         elif file_ext == ".txt":
             raise ValueError("input_file with .txt extension requires generate_prompts_from_file=true. For existing prompts file, use .jsonl or .json")
     else:
-        # When generate_prompts is true and no input_file, we'll generate to output_dir
+        # When generate_prompts is true and no input_file, we'll generate to temp in runner
         input_path = out_dir / "generated_prompts.json"
 
-    # Use RPS throttle if requests_per_second > 0, otherwise max throughput
-    use_rps_throttle = bench.requests_per_second > 0
-    rps = bench.requests_per_second if use_rps_throttle else float(bench.concurrency)
+    # Max throughput: no throttle (constant(0)); users run as fast as API allows. Single process only.
+    use_rps_throttle = False
+    num_workers = 1
 
     return RunConfig(
         base_url=normalize_base_url(ps.base_url),
