@@ -16,6 +16,7 @@
 <p align="center">
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#prompt-generation">Prompt Generation</a> •
   <a href="#examples">Examples</a> •
   <a href="#documentation">Documentation</a> •
   <a href="#contributing">Contributing</a>
@@ -77,6 +78,29 @@ flocust
 ```
 
 Output is written under `artifacts/<model>-users<N>-rps<R>/` with `results.jsonl`, `report.json`, and a console dashboard.
+
+---
+
+## Prompt generation
+
+Generate JSONL prompt files with **exact token counts** using the standalone script (uses tiktoken; no Flocust imports). Output goes to `input_examples/` by default and is compatible with `input_file` in your config.
+
+| Command | Description |
+|--------|-------------|
+| `python scripts/generate_prompts.py -n 100 -t 128` | 100 prompts, 128 tokens each (default encoding; writes to `input_examples/prompts_generated.jsonl`) |
+| `python scripts/generate_prompts.py -n 1000 -t 1024 -o input_examples/prompts_1024.jsonl` | 1000 prompts, 1024 tokens each, custom path |
+| `python scripts/generate_prompts.py -n 50 -t 2048 -e o200k_base` | 50 prompts, 2048 tokens, GPT-4o encoding |
+| `python scripts/generate_prompts.py -n 100 -t 512 -p my_text.txt -o custom.jsonl` | Custom paragraph from file |
+
+**Options:** `-n` / `--num-prompts`, `-t` / `--tokens`, `-o` / `--output` (default: `input_examples/prompts_generated.jsonl`), `-e` / `--encoding` (`cl100k_base` \| `o200k_base` \| `p50k_base` \| `r50k_base`), `-p` / `--paragraph-file`, `--no-vary` (identical prompts).
+
+Then point your config at the generated file:
+
+```json
+"input_file": "./input_examples/prompts_generated.jsonl"
+```
+
+See [scripts/README.md](scripts/README.md) for full details and encoding guide.
 
 ---
 
@@ -191,6 +215,10 @@ Flocust/
 │   ├── cli/          # CLI entry (flocust), interactive prompts
 │   ├── common/       # config, loader, runner, analyzer, dashboard, models
 │   └── config.sample.json
+├── scripts/
+│   ├── generate_prompts.py   # Standalone prompt generator (tiktoken, exact token counts)
+│   └── README.md
+├── input_examples/    # Example and generated prompt files (.jsonl)
 ├── prompts.jsonl
 ├── pyproject.toml
 ├── requirements.txt
