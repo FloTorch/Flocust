@@ -49,6 +49,24 @@ def _usage_from_headers(headers) -> tuple[int, int]:
         return 0, 0
 
 
+def _usage_from_body(usage_or_data: dict | None) -> tuple[int, int]:
+    """Extract input_tokens and output_tokens from response body (usage object). Fallback when headers are empty."""
+    if not isinstance(usage_or_data, dict):
+        return 0, 0
+    usage = usage_or_data.get("usage") if isinstance(usage_or_data.get("usage"), dict) else usage_or_data
+    if not isinstance(usage, dict):
+        return 0, 0
+    try:
+        inp = usage.get("input_tokens") or usage.get("prompt_tokens")
+        out = usage.get("output_tokens") or usage.get("completion_tokens")
+        return (
+            int(inp) if inp is not None else 0,
+            int(out) if out is not None else 0,
+        )
+    except (TypeError, ValueError):
+        return 0, 0
+
+
 def _cached_tokens_from_usage(usage_or_data: dict) -> int | None:
     """Extract cached_tokens from OpenAI-style usage (prompt_tokens_details.cached_tokens)."""
     if not isinstance(usage_or_data, dict):
@@ -313,6 +331,8 @@ class LLMUser(HttpUser):
                             if seen_done:
                                 break
                     input_tokens, output_tokens = _usage_from_headers(response.headers)
+                    if input_tokens == 0 and output_tokens == 0 and stream_usage:
+                        input_tokens, output_tokens = _usage_from_body(stream_usage)
                     if status_code == 200:
                         response.success()
                     else:
@@ -343,6 +363,8 @@ class LLMUser(HttpUser):
                                 if isinstance(msg, dict):
                                     content = (msg.get("content") or "").strip()
                             input_tokens, output_tokens = _usage_from_headers(response.headers)
+                            if input_tokens == 0 and output_tokens == 0:
+                                input_tokens, output_tokens = _usage_from_body(response_data)
                             response.success()
                         except Exception:
                             response.failure("Invalid JSON response")
