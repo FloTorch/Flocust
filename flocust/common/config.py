@@ -57,7 +57,10 @@ class BenchSettings(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
-    prompts_path: str | None = Field(default=None, description="Path to prompts file (overrides root input_file when set)")
+    generate_prompts_from_file: bool = Field(default=False, description="Generate prompts from source file (no LLM call). Use input_file to specify custom source file, or defaults to default text file")
+    prompt_mean_input_tokens: int | None = Field(default=None, ge=1, description="Mean input tokens for generated prompts")
+    prompt_stddev_input_tokens: int | None = Field(default=None, ge=0, description="Stddev input tokens for generated prompts")
+    prompt_mean_output_tokens: int | None = Field(default=None, ge=1, description="Mean output tokens (used in prompt instruction)")
 
 
 class ReportSettings(BaseModel):
@@ -146,6 +149,10 @@ class RunConfig(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
+    generate_prompts_from_file: bool = Field(default=False, description="Generate prompts from source file (no LLM call). Use input_file to specify custom source file, or defaults to default text file")
+    prompt_mean_input_tokens: int | None = Field(default=None, ge=1, description="Mean input tokens for generated prompts")
+    prompt_stddev_input_tokens: int | None = Field(default=None, ge=0, description="Stddev input tokens for generated prompts")
+    prompt_mean_output_tokens: int | None = Field(default=None, ge=1, description="Mean output tokens (used in prompt instruction)")
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(
         default="cl100k_base",
         description="Tiktoken encoding for token counting",
@@ -160,8 +167,17 @@ class RunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_prompts_path_unless_generate(self) -> "RunConfig":
-        if not self.generate_prompts and self.prompts_path is None:
-            raise ValueError("prompts_path is required when generate_prompts is False")
+        if not self.generate_prompts and not self.generate_prompts_from_file and self.prompts_path is None:
+            raise ValueError("prompts_path is required when generate_prompts and generate_prompts_from_file are False")
+        if self.generate_prompts and self.generate_prompts_from_file:
+            raise ValueError("Cannot use both generate_prompts and generate_prompts_from_file")
+        if self.generate_prompts_from_file:
+            if self.prompt_mean_input_tokens is None:
+                raise ValueError("prompt_mean_input_tokens is required when generate_prompts_from_file is True")
+            if self.prompt_stddev_input_tokens is None:
+                raise ValueError("prompt_stddev_input_tokens is required when generate_prompts_from_file is True")
+            if self.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_output_tokens is required when generate_prompts_from_file is True")
         return self
 
     @property
@@ -208,15 +224,35 @@ def load_config_from_file(path: Path) -> RunConfig:
     num_users = max(target_rps, math.ceil(target_rps * assumed_latency_sec))
     out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(target_rps)}"
 
-    # Resolve prompts path: bench.prompts_path overrides root input_file when set
-    prompts_source = (bench.prompts_path or "").strip() or cfg.input_file.strip()
-    if not prompts_source and not bench.generate_prompts:
-        raise ValueError("input_file or bench.prompts_path is required when generate_prompts is false")
+    # Resolve prompts path
+    input_file_resolved = cfg.input_file.strip()
+    if not input_file_resolved and not bench.generate_prompts and not bench.generate_prompts_from_file:
+        raise ValueError("input_file is required when generate_prompts and generate_prompts_from_file are false")
 
-    if prompts_source:
-        input_path = Path(prompts_source)
+    if bench.generate_prompts_from_file:
+        if input_file_resolved:
+            source_file_path = Path(input_file_resolved)
+            if not source_file_path.is_absolute():
+                source_file_path = (path.parent / source_file_path).resolve()
+            file_ext = source_file_path.suffix.lower()
+            if file_ext not in (".txt", ""):
+                raise ValueError(f"input_file must be a .txt file when generate_prompts_from_file is true, got: {source_file_path}")
+            if bench.prompt_mean_input_tokens is None or bench.prompt_stddev_input_tokens is None or bench.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_input_tokens, prompt_stddev_input_tokens, and prompt_mean_output_tokens are required when generate_prompts_from_file is true")
+            input_path = source_file_path
+        else:
+            input_path = None
+            if bench.prompt_mean_input_tokens is None or bench.prompt_stddev_input_tokens is None or bench.prompt_mean_output_tokens is None:
+                raise ValueError("prompt_mean_input_tokens, prompt_stddev_input_tokens, and prompt_mean_output_tokens are required when generate_prompts_from_file is true")
+    elif input_file_resolved:
+        input_path = Path(input_file_resolved)
         if not input_path.is_absolute():
             input_path = (path.parent / input_path).resolve()
+        file_ext = input_path.suffix.lower()
+        if file_ext in (".jsonl", ".json"):
+            pass
+        elif file_ext == ".txt":
+            raise ValueError("input_file with .txt extension requires generate_prompts_from_file=true. For existing prompts file, use .jsonl or .json")
     else:
         # When generate_prompts is true and no input_file, we'll generate to temp in runner
         input_path = out_dir / "generated_prompts.json"
@@ -239,10 +275,14 @@ def load_config_from_file(path: Path) -> RunConfig:
         duration_sec=bench.duration_sec,
         ramp_up_sec=bench.ramp_up_sec,
         use_rps_throttle=use_rps_throttle,
-        num_workers=num_workers,
+        num_workers=bench.num_workers,
         stream=bench.stream,
         prompt_cache=bench.prompt_cache,
         generate_prompts=bench.generate_prompts,
         generate_prompts_count=bench.generate_prompts_count,
+        generate_prompts_from_file=bench.generate_prompts_from_file,
+        prompt_mean_input_tokens=bench.prompt_mean_input_tokens,
+        prompt_stddev_input_tokens=bench.prompt_stddev_input_tokens,
+        prompt_mean_output_tokens=bench.prompt_mean_output_tokens,
         encoding="cl100k_base",
     )

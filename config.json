@@ -16,9 +16,12 @@
     "max_tokens": 1024,
     "stream": true,
     "generate_prompts": false,
-    "generate_prompts_count": null
+    "generate_prompts_count": null,
+    "prompt_mean_input_tokens": 550,
+    "prompt_stddev_input_tokens": 250,
+    "prompt_mean_output_tokens": 150
   },
-  "input_file": "./input_examples/prompt_128_tokens.jsonl",
+  "input_file": "",
   "report": {
     "format": "console"
   }
