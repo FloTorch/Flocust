@@ -119,9 +119,11 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
 | Section | Key fields |
 |--------|-------------|
 | **provider_settings** | `api_key`, `model`, `base_url` (supports `$ENV_VAR`) |
-| **bench** | `concurrency`, `requests`, `duration_sec`, `requests_per_second`, `timeout_sec`, `max_tokens`, `stream`, `generate_prompts`, `generate_prompts_count` |
-| **input_file** | Path to prompts file (JSON/JSONL). Required if `generate_prompts` is false. |
+| **bench** | `concurrency`, `requests`, `duration_sec`, `requests_per_second`, `timeout_sec`, `max_tokens` (max **output** tokens), `min_output_tokens` (optional; sent as `min_tokens` so output is near max when backend supports it), `stream`, `generate_prompts`, `generate_prompts_count`, `generate_synthetic_prompts`, `prompt_input_tokens`, `normalize_prompt_input_tokens` |
+| **input_file** | Path to prompts file (JSON/JSONL). Required if neither `generate_prompts` nor `generate_synthetic_prompts` is true. |
 | **report** | `format`: `"console"` or `"json"` |
+
+When using `generate_prompts` or `generate_synthetic_prompts`, prompts are written to **`<output_dir>/generated_prompts.jsonl`** (shown in the run summary). Use `prompt_input_tokens` to target approximate input length (default **100**); corpus generation uses a character heuristic (~4 chars per token), with **no normalization** (no trim/pad). **File-based prompts are always used as-is.** Exactly one of: input file, `generate_prompts`, or `generate_synthetic_prompts` is allowed. **`normalize_prompt_input_tokens`** (default **false**): when set to true, every *loaded* prompt is normalized to `prompt_input_tokens`; leave false to avoid any normalization.
 
 **Example `config.json`**
 
@@ -141,15 +143,21 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
     "ramp_up_sec": 0,
     "timeout_sec": 60,
     "max_tokens": 1024,
+    "min_output_tokens": 1024,
     "stream": true,
     "generate_prompts": false,
-    "generate_prompts_count": null
+    "generate_prompts_count": null,
+    "generate_synthetic_prompts": false,
+    "prompt_input_tokens": 100,
+    "normalize_prompt_input_tokens": false
   },
   "input_file": "prompts.jsonl",
   "report": { "format": "console" }
 }
 ```
 
+- `max_tokens`: maximum **output** (completion) tokens per response; sent to the API and recorded `output_tokens` are capped so they never exceed this value.
+- `min_output_tokens`: optional; when set (e.g. to the same as `max_tokens`), sent as `min_tokens` so backends that support it (e.g. vLLM, Flotorch) generate at least that many tokens—use this to get output **near** `max_tokens` instead of short 200–300 token replies.
 - `duration_sec > 0`: run for that many seconds; otherwise the run stops after `requests` are completed.
 - `generate_prompts: true`: prompts are generated via a one-shot LLM call; you can omit `input_file` and set `generate_prompts_count` (1–1000).
 

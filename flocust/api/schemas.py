@@ -115,7 +115,7 @@ class RunExperimentRequest(BaseModel):
         description="True: throttle to requests_per_second. False: max throughput.",
     )
     timeout_sec: int = Field(default=60, ge=1, le=300, description="Per-request timeout (seconds)")
-    max_tokens: int = Field(default=1024, ge=1, le=128_000, description="Max completion tokens")
+    max_tokens: int = Field(default=1024, ge=1, le=128_000, description="Max output (completion) tokens per response")
     stream: bool = Field(default=True, description="Stream responses for TTFT/inter-token metrics")
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM (when no file uploaded)")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)

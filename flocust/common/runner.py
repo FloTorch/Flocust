@@ -3,9 +3,7 @@
 import json
 import math
 import random
-import shutil
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -20,9 +18,13 @@ from locust.env import Environment
 from locust.log import setup_logging
 
 from flocust.common.config import RunConfig
+from flocust.common.generator import generate_prompts as generate_synthetic_prompts_list
 from flocust.common.loader import load_prompts
 from flocust.common.models import RequestResult
+from flocust.common.tokenizer import normalize_prompt_to_tokens
 from flocust.common.utils import percentile
+
+GENERATED_PROMPTS_FILENAME = "generated_prompts.jsonl"
 
 # Default count for LLM-generated prompts (10–20% of num_requests).
 GENERATE_PROMPTS_DEFAULT_PERCENT = 0.15
@@ -185,7 +187,8 @@ def _stop_progress(runner: LoadTestRunner):
 
 
 def _generate_prompts_via_llm(config: RunConfig, count: int) -> list[str]:
-    """Call the LLM once (non-streaming) to generate count short prompts."""
+    """Call the LLM once (non-streaming) to generate count prompts. No normalization."""
+    input_tokens = getattr(config, "prompt_input_tokens", 100)
     url = f"{config.base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": config.model,
@@ -193,13 +196,14 @@ def _generate_prompts_via_llm(config: RunConfig, count: int) -> list[str]:
             {
                 "role": "user",
                 "content": (
-                    f"Generate exactly {count} short prompts for testing an LLM API. "
-                    "Each prompt should be one line, 1-2 sentences, varied topics (questions, tasks, summaries). "
+                    f"Generate exactly {count} prompts for testing an LLM API. "
+                    f"Each prompt should be approximately {input_tokens} tokens when tokenized (roughly {max(50, input_tokens // 2)}–{input_tokens * 2} words). "
+                    "One line per prompt, varied topics (questions, tasks, summaries). "
                     "Output only the prompts, one per line, no numbering or bullets."
                 ),
             }
         ],
-        "max_tokens": min(4096, count * 80),
+        "max_tokens": min(4096, count * max(80, input_tokens // 2)),
         "temperature": 0.7,
         "stream": False,
     }
@@ -232,9 +236,18 @@ class LLMUser(HttpUser):
         super().__init__(environment)
         if not hasattr(environment, "_prompts_loaded"):
             path = Path(self.environment.parsed_options.prompts_path)
-            environment._prompts_loaded = load_prompts(path)
-            if not environment._prompts_loaded:
+            raw = load_prompts(path)
+            if not raw:
                 raise ValueError(f"No prompts loaded from {path}")
+            # No normalization by default: file prompts used as-is; generated prompts already have target length from generation step.
+            if getattr(self.environment.parsed_options, "normalize_prompt_input_tokens", False):
+                target = getattr(self.environment.parsed_options, "prompt_input_tokens", 100)
+                enc = getattr(self.environment.parsed_options, "encoding", "cl100k_base")
+                environment._prompts_loaded = [
+                    normalize_prompt_to_tokens(p, target, enc) for p in raw
+                ]
+            else:
+                environment._prompts_loaded = raw
 
     def on_start(self):
         """Set up authentication headers."""
@@ -261,13 +274,18 @@ class LLMUser(HttpUser):
         # When prompt_cache is False (default), prepend a unique nonce so each request
         # has a different prefix → no OpenAI prompt cache hits (reproducible load tests).
         user_content = prompt if prompt_cache else f"[req:{req_id}]\n{prompt}"
+        max_tok = self.environment.parsed_options.max_tokens
         payload = {
             "model": self.environment.parsed_options.model,
             "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": self.environment.parsed_options.max_tokens,
+            "max_tokens": max_tok,
             "temperature": 0.0,
             "stream": stream,
         }
+        # When set, send min_tokens so backends that support it (vLLM, etc.) generate at least this many tokens
+        min_tok = getattr(self.environment.parsed_options, "min_output_tokens", None)
+        if min_tok is not None and min_tok > 0:
+            payload["min_tokens"] = min(min_tok, max_tok)
 
         start_time = time.perf_counter_ns()
         content = ""
@@ -382,8 +400,12 @@ class LLMUser(HttpUser):
             _cached_tokens_from_usage(stream_usage) if stream else _cached_tokens_from_usage(response_data)
         )
 
+        # max_tokens is the output (completion) limit; cap reported output_tokens so they never exceed it
+        max_output = self.environment.parsed_options.max_tokens
+        output_tokens_capped = min(output_tokens, max_output) if output_tokens else 0
+
         success = status_code == 200
-        total_tokens = input_tokens + output_tokens
+        total_tokens = input_tokens + output_tokens_capped
         tokens_per_sec = round((total_tokens / (latency_ms / 1000)), 2) if latency_ms > 0 and total_tokens > 0 else None
         result = RequestResult(
             req_id=req_id,
@@ -392,7 +414,7 @@ class LLMUser(HttpUser):
             latency_ms=round(latency_ms, 2),
             ttft_ms=round(ttft_ms, 2) if ttft_ms else None,
             input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            output_tokens=output_tokens_capped,
             cached_tokens=cached_tokens,
             tokens_per_sec=tokens_per_sec,
             success=success,
@@ -511,11 +533,14 @@ def _run_experiment_programmatic(
         "api_key": config.api_key,
         "model": config.model,
         "max_tokens": config.max_tokens,
+        "min_output_tokens": getattr(config, "min_output_tokens", None),
         "prompts_path": str(config.prompts_path),
         "encoding": config.encoding,
         "timeout": timeout_tuple,
         "stream": config.stream,
         "prompt_cache": getattr(config, "prompt_cache", False),
+        "normalize_prompt_input_tokens": getattr(config, "normalize_prompt_input_tokens", False),
+        "prompt_input_tokens": getattr(config, "prompt_input_tokens", 100),
     })()
 
     # Pass test runner instance to users
@@ -563,17 +588,21 @@ def _run_experiment_programmatic(
 
 def run_experiment(
     config: RunConfig,
-) -> tuple[list[RequestResult], Path, Path, float]:
+) -> tuple[list[RequestResult], Path, Path, float, Path | None]:
     """
     Run a single load test experiment using programmatic Locust API.
     Runs at target RPS with given concurrency until num_requests are completed.
-    When generate_prompts=True, generates prompts via one LLM call first.
-    Writes result.jsonl and returns (results, result_path, output_dir, duration_seconds).
+    When generate_prompts or generate_synthetic_prompts is True, generates prompts first and saves to output_dir.
+    Returns (results, result_path, output_dir, duration_seconds, generated_prompts_path or None).
     """
     # Create isolated runner instance
     runner = LoadTestRunner()
 
-    generated_prompts_temp_dir: Path | None = None
+    out_dir = Path(config.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    generated_prompts_path: Path | None = None
+    prompt_input_tokens = getattr(config, "prompt_input_tokens", 100)
+
     if config.generate_prompts:
         count = config.generate_prompts_count
         if count is None:
@@ -582,22 +611,41 @@ def run_experiment(
                 min(GENERATE_PROMPTS_MAX, int(config.num_requests * GENERATE_PROMPTS_DEFAULT_PERCENT)),
             )
         count = max(GENERATE_PROMPTS_MIN, min(GENERATE_PROMPTS_MAX, count))
-        sys.stdout.write("Generating prompts via LLM...\n")
+        sys.stdout.write(f"Generating {count} prompts via LLM (target ~{prompt_input_tokens} input tokens each)...\n")
         sys.stdout.flush()
         prompts_list = _generate_prompts_via_llm(config, count)
-        sys.stdout.write(f"Prompts generated: {len(prompts_list)}\n")
+        generated_prompts_path = out_dir / GENERATED_PROMPTS_FILENAME
+        with open(generated_prompts_path, "w", encoding="utf-8") as f:
+            for p in prompts_list:
+                f.write(json.dumps({"prompt": p}, ensure_ascii=False) + "\n")
+        sys.stdout.write(f"  Saved to: {generated_prompts_path.resolve()}\n")
         sys.stdout.flush()
-        generated_prompts_temp_dir = Path(tempfile.mkdtemp(prefix="flocust_prompts_"))
-        prompts_path = generated_prompts_temp_dir / "prompts.jsonl"
-        prompts_path.write_text("\n".join(prompts_list), encoding="utf-8")
-        config = config.model_copy(update={"prompts_path": prompts_path})
+        config = config.model_copy(update={"prompts_path": generated_prompts_path})
+
+    elif getattr(config, "generate_synthetic_prompts", False):
+        count = config.generate_prompts_count or min(GENERATE_PROMPTS_MAX, max(GENERATE_PROMPTS_MIN, config.num_requests))
+        count = max(GENERATE_PROMPTS_MIN, min(GENERATE_PROMPTS_MAX, count))
+        sys.stdout.write(f"Generating {count} synthetic prompts (~{prompt_input_tokens} input tokens each)...\n")
+        sys.stdout.flush()
+        enc = getattr(config, "encoding", "cl100k_base")
+        prompts_list = generate_synthetic_prompts_list(
+            count=count,
+            input_tokens=prompt_input_tokens,
+            theme="sonnet",
+            encoding=enc,
+        )
+        generated_prompts_path = out_dir / GENERATED_PROMPTS_FILENAME
+        with open(generated_prompts_path, "w", encoding="utf-8") as f:
+            for p in prompts_list:
+                f.write(json.dumps({"prompt": p}, ensure_ascii=False) + "\n")
+        sys.stdout.write(f"  Saved to: {generated_prompts_path.resolve()}\n")
+        sys.stdout.flush()
+        config = config.model_copy(update={"prompts_path": generated_prompts_path})
 
     prompts_path = Path(config.prompts_path)
     if not prompts_path.exists():
         raise FileNotFoundError(f"Prompts file not found: {prompts_path}")
 
-    out_dir = Path(config.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / RESULTS_FILENAME
 
     # Single-process path (multiprocessing removed for reliability)
@@ -624,13 +672,8 @@ def run_experiment(
         sys.stderr = real_stderr
         real_stdout.write(_ANSI_CLEAR_LINE + " " * _PROGRESS_LINE_WIDTH + "\n")
         real_stdout.flush()
-        if generated_prompts_temp_dir is not None and generated_prompts_temp_dir.exists():
-            try:
-                shutil.rmtree(generated_prompts_temp_dir, ignore_errors=True)
-            except OSError:
-                pass
 
     # Strict: return exactly num_requests results
     with runner.results_lock:
         results = runner.results[: config.num_requests]
-    return results, result_path, out_dir, duration_seconds
+    return results, result_path, out_dir, duration_seconds, generated_prompts_path
