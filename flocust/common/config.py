@@ -45,7 +45,18 @@ class BenchSettings(BaseModel):
     duration_sec: float = Field(default=0, ge=0)
     ramp_up_sec: float = Field(default=0, ge=0)
     timeout_sec: int = Field(default=60, ge=1, le=300)
-    max_tokens: int = Field(default=1024, ge=1, le=128_000)
+    max_tokens: int = Field(
+        default=1024,
+        ge=1,
+        le=128_000,
+        description="Max output (completion) tokens per response; API must not exceed this",
+    )
+    min_output_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=128_000,
+        description="Min output tokens (sent as min_tokens). Set to max_tokens so output is near max; vLLM and similar backends support this.",
+    )
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
     num_workers: int = Field(
         default=1, ge=1, le=64,
@@ -57,6 +68,20 @@ class BenchSettings(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
+    generate_synthetic_prompts: bool = Field(
+        default=False,
+        description="Generate prompts from corpus (sonnet.txt) with target input token length",
+    )
+    prompt_input_tokens: int = Field(
+        default=100,
+        ge=1,
+        le=128000,
+        description="Target input tokens per prompt when generating (LLM or corpus); default 100 if not provided",
+    )
+    normalize_prompt_input_tokens: bool = Field(
+        default=False,
+        description="If True, normalize every loaded prompt to prompt_input_tokens (trim/pad). Default False: use file prompts as-is; generated prompts get target length during generation only.",
+    )
     prompts_path: str | None = Field(default=None, description="Path to prompts file (overrides root input_file when set)")
 
 
@@ -118,7 +143,18 @@ class RunConfig(BaseModel):
         ge=0.1, le=10_000.0,
         description="Target RPS when use_rps_throttle is True",
     )
-    max_tokens: int = Field(ge=1, le=128_000, default=1024, description="Max tokens per completion")
+    max_tokens: int = Field(
+        ge=1,
+        le=128_000,
+        default=1024,
+        description="Max output (completion) tokens per response; recorded output_tokens will not exceed this",
+    )
+    min_output_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=128_000,
+        description="Min output tokens to generate (sent as min_tokens). When set, backends that support it will generate at least this many tokens so output is near max_tokens. Default None = do not send.",
+    )
     prompts_path: Path | None = Field(
         default=None,
         description="Path to prompts file. Required unless generate_prompts is True.",
@@ -146,6 +182,20 @@ class RunConfig(BaseModel):
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
+    generate_synthetic_prompts: bool = Field(
+        default=False,
+        description="Generate prompts from corpus with target input token length",
+    )
+    prompt_input_tokens: int = Field(
+        default=100,
+        ge=1,
+        le=128_000,
+        description="Target input tokens per prompt when generating (LLM or corpus); default 100 if not provided",
+    )
+    normalize_prompt_input_tokens: bool = Field(
+        default=False,
+        description="If True, normalize every loaded prompt to prompt_input_tokens. Default False: no normalization; generated prompts get target length during generation only.",
+    )
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(
         default="cl100k_base",
         description="Tiktoken encoding for token counting",
@@ -159,9 +209,20 @@ class RunConfig(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def _require_prompts_path_unless_generate(self) -> "RunConfig":
-        if not self.generate_prompts and self.prompts_path is None:
-            raise ValueError("prompts_path is required when generate_prompts is False")
+    def _require_exactly_one_prompts_source(self) -> "RunConfig":
+        use_file = self.prompts_path is not None
+        use_llm = self.generate_prompts
+        use_corpus = getattr(self, "generate_synthetic_prompts", False)
+        if use_llm and use_corpus:
+            raise ValueError(
+                "Only one prompts source is allowed. You have set both generate_prompts and generate_synthetic_prompts. "
+                "Use either: input file, or generate_prompts (LLM), or generate_synthetic_prompts (corpus)—not more than one."
+            )
+        if not use_llm and not use_corpus and not use_file:
+            raise ValueError(
+                "Exactly one prompts source is required. Set input_file/bench.prompts_path (file), "
+                "or generate_prompts (LLM), or generate_synthetic_prompts (corpus)—exactly one."
+            )
         return self
 
     @property
@@ -208,18 +269,42 @@ def load_config_from_file(path: Path) -> RunConfig:
     num_users = max(target_rps, math.ceil(target_rps * assumed_latency_sec))
     out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(target_rps)}"
 
-    # Resolve prompts path: bench.prompts_path overrides root input_file when set
-    prompts_source = (bench.prompts_path or "").strip() or cfg.input_file.strip()
-    if not prompts_source and not bench.generate_prompts:
-        raise ValueError("input_file or bench.prompts_path is required when generate_prompts is false")
+    # Exactly one of: input file, generate_prompts, or generate_synthetic_prompts
+    use_llm = bench.generate_prompts
+    use_corpus = getattr(bench, "generate_synthetic_prompts", False)
+    prompts_source = (bench.prompts_path or "").strip() or (cfg.input_file or "").strip()
+    # "Explicit file" = user set bench.prompts_path or set input_file to something other than default
+    default_input = "prompts.jsonl"
+    has_explicit_file = bool((bench.prompts_path or "").strip()) or (
+        bool(prompts_source) and prompts_source != default_input
+    )
 
-    if prompts_source:
+    if use_llm and use_corpus:
+        raise ValueError(
+            "Only one prompts source is allowed. Config has both generate_prompts and generate_synthetic_prompts set to true. "
+            "Use exactly one: input_file (file), or generate_prompts (LLM), or generate_synthetic_prompts (corpus)."
+        )
+    if has_explicit_file and (use_llm or use_corpus):
+        raise ValueError(
+            "Only one prompts source is allowed. You set input_file or bench.prompts_path and also set generate_prompts or generate_synthetic_prompts. "
+            "Use exactly one: input file, or generate_prompts, or generate_synthetic_prompts."
+        )
+    if not use_llm and not use_corpus and not (prompts_source or "").strip():
+        raise ValueError(
+            "Exactly one prompts source is required. Set input_file or bench.prompts_path (file), "
+            "or generate_prompts (LLM), or generate_synthetic_prompts (corpus)—exactly one."
+        )
+
+    if use_llm or use_corpus:
+        input_path = out_dir / "generated_prompts.jsonl"
+    else:
         input_path = Path(prompts_source)
         if not input_path.is_absolute():
             input_path = (path.parent / input_path).resolve()
-    else:
-        # When generate_prompts is true and no input_file, we'll generate to temp in runner
-        input_path = out_dir / "generated_prompts.json"
+        if not input_path.exists():
+            raise ValueError(
+                f"Prompts file not found: {input_path}. Use an existing file or set generate_prompts or generate_synthetic_prompts."
+            )
 
     # Max throughput: no throttle (constant(0)); users run as fast as API allows. Single process only.
     use_rps_throttle = False
@@ -232,6 +317,7 @@ def load_config_from_file(path: Path) -> RunConfig:
         concurrency=num_users,
         requests_per_second=float(target_rps),
         max_tokens=bench.max_tokens,
+        min_output_tokens=getattr(bench, "min_output_tokens", None),
         prompts_path=input_path,
         output_dir=out_dir,
         num_requests=bench.requests,
@@ -244,5 +330,8 @@ def load_config_from_file(path: Path) -> RunConfig:
         prompt_cache=bench.prompt_cache,
         generate_prompts=bench.generate_prompts,
         generate_prompts_count=bench.generate_prompts_count,
+        generate_synthetic_prompts=getattr(bench, "generate_synthetic_prompts", False),
+        prompt_input_tokens=getattr(bench, "prompt_input_tokens", 100),
+        normalize_prompt_input_tokens=getattr(bench, "normalize_prompt_input_tokens", False),
         encoding="cl100k_base",
     )

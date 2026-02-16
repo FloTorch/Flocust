@@ -42,6 +42,7 @@ def _build_config(
     requests_per_second: float,
     num_requests: int,
     max_tokens: int,
+    min_output_tokens: int | None,
     timeout_sec: int,
     duration_sec: float,
     ramp_up_sec: float,
@@ -53,7 +54,7 @@ def _build_config(
     generate_prompts: bool,
     generate_prompts_count: int | None,
 ) -> RunConfig:
-    """Build RunConfig from API form parameters."""
+    """Build RunConfig from API form parameters. Synthetic generation and prompt_input_tokens use RunConfig defaults."""
     return RunConfig(
         base_url=base_url,
         api_key=api_key,
@@ -62,6 +63,7 @@ def _build_config(
         requests_per_second=requests_per_second,
         num_requests=num_requests,
         max_tokens=max_tokens,
+        min_output_tokens=min_output_tokens,
         timeout_sec=timeout_sec,
         duration_sec=duration_sec,
         ramp_up_sec=ramp_up_sec,
@@ -121,7 +123,7 @@ def _run_and_prepare_response(
     background_tasks: BackgroundTasks,
 ) -> RunExperimentResponse:
     """Run experiment, compute report, schedule full-report write, return summary + report_id."""
-    results, result_path, out_dir, duration_seconds = run_experiment(config)
+    results, result_path, out_dir, duration_seconds, _ = run_experiment(config)
     report = compute_report(
         results,
         experiment_id=experiment_id,
@@ -155,7 +157,8 @@ async def run_experiment_endpoint(
     ramp_up_sec: float = Form(0, ge=0, description="Stagger worker start (seconds)"),
     use_rps_throttle: bool = Form(False, description="Throttle to RPS (false = max throughput)"),
     timeout_sec: int = Form(60, ge=1, le=300, description="Per-request timeout (seconds)"),
-    max_tokens: int = Form(1024, ge=1, le=128_000, description="Max completion tokens"),
+    max_tokens: int = Form(1024, ge=1, le=128_000, description="Max output (completion) tokens per response"),
+    min_output_tokens: int | None = Form(None, description="Min output tokens (sent as min_tokens; set to max_tokens for output near max)"),
     encoding: str = Form("cl100k_base", description="Tiktoken encoding"),
     stream: bool = Form(True, description="Stream for TTFT/inter-token metrics"),
     generate_prompts: bool = Form(False, description="Generate prompts via LLM"),
@@ -215,6 +218,7 @@ async def run_experiment_endpoint(
                 requests_per_second=requests_per_second,
                 num_requests=num_requests,
                 max_tokens=max_tokens,
+                min_output_tokens=min_output_tokens,
                 timeout_sec=timeout_sec,
                 duration_sec=duration_sec,
                 ramp_up_sec=ramp_up_sec,
@@ -239,6 +243,7 @@ async def run_experiment_endpoint(
                 requests_per_second=requests_per_second,
                 num_requests=num_requests,
                 max_tokens=max_tokens,
+                min_output_tokens=min_output_tokens,
                 timeout_sec=timeout_sec,
                 duration_sec=duration_sec,
                 ramp_up_sec=ramp_up_sec,
