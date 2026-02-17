@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from flocust.common.models import ReportCard, RequestResult
+from flocust.common.models import FailedRequestDetail, ReportCard, RequestResult
 from flocust.common.utils import percentile
 
 DEFAULT_RESULT_FILENAME = "results.jsonl"
@@ -66,10 +66,22 @@ def compute_report(
             result_file=result_file,
             total_cached_tokens=0,
             requests_with_cache_hit=0,
+            failed_requests_detail=[],
         )
 
     successful = [r for r in results if r.success]
-    failed = len(results) - len(successful)
+    failed_results = [r for r in results if not r.success]
+    failed = len(failed_results)
+    PROMPT_PREVIEW_LEN = 200
+    failed_requests_detail = [
+        FailedRequestDetail(
+            req_id=r.req_id,
+            error=r.error or "Unknown error",
+            latency_ms=r.latency_ms,
+            input_prompt_preview=(r.input_prompt[:PROMPT_PREVIEW_LEN] + "…") if len(r.input_prompt) > PROMPT_PREVIEW_LEN else (r.input_prompt or None),
+        )
+        for r in failed_results
+    ]
     latencies = [r.latency_ms for r in results]
     latencies.sort()
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
@@ -201,6 +213,7 @@ def compute_report(
         notes=None,
         total_cached_tokens=total_cached_tokens,
         requests_with_cache_hit=requests_with_cache_hit,
+        failed_requests_detail=failed_requests_detail,
     )
 
 
@@ -209,3 +222,14 @@ def write_report(report: ReportCard, output_path: Path) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+
+def write_failures_file(report: ReportCard, output_path: Path) -> None:
+    """Write failed requests to output_path as JSONL (one JSON object per line). Only writes if there are failures."""
+    detail = getattr(report, "failed_requests_detail", None) or []
+    if not detail:
+        return
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [d.model_dump_json() for d in detail]
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

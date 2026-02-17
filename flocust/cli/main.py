@@ -12,7 +12,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from flocust.common.analyzer import compute_report, write_report
+from flocust.common.analyzer import compute_report, write_failures_file, write_report
 from flocust.common.config import (
     RunConfig,
     artifact_output_dir,
@@ -134,9 +134,13 @@ def collect_config_from_cli() -> RunConfig:
     use_rps_throttle = rps > 0
 
     timeout_sec = _prompt_int("Request timeout (seconds)", 60, 1, 300)
-    max_tokens = _prompt_int("Max tokens per completion", 1024, 1, 128_000)
+    max_output_tokens = _prompt_int("Max output tokens per completion", 1024, 1, 128_000)
     stream = _prompt_bool("Stream responses (TTFT/inter-token)? (y/n)", default=True)
     prompt_cache = _prompt_bool("Enable prompt caching (y/n)? (n = unique request per call)", default=False)
+    instruct_output_tokens = _prompt_bool(
+        "Instruct model to generate ~max_output_tokens output (y/n)? (y = consistent load test metrics)",
+        default=True,
+    )
 
     generate_type = _prompt("Prompts: (f)ile, (l)lm-generated", "f").lower().strip()
     prompts_path: Path | None = None
@@ -173,7 +177,7 @@ def collect_config_from_cli() -> RunConfig:
         model=model,
         concurrency=concurrency,
         requests_per_second=rps,
-        max_tokens=max_tokens,
+        max_output_tokens=max_output_tokens,
         prompts_path=prompts_path,
         output_dir=output_dir,
         num_requests=num_requests,
@@ -184,6 +188,7 @@ def collect_config_from_cli() -> RunConfig:
         encoding=DEFAULT_ENCODING,  # type: ignore[arg-type]
         stream=stream,
         prompt_cache=prompt_cache,
+        instruct_output_tokens=instruct_output_tokens,
         generate_prompts=generate_prompts,
         generate_prompts_count=generate_prompts_count,
     )
@@ -200,6 +205,8 @@ Supported usage:
   flocust CONFIG          Run load test with CONFIG (e.g. config.json)
   flocust -c PATH         Run load test with config file at PATH
   flocust --prompt-cache  Enable prompt caching (default: disabled)
+  flocust --max-output-tokens N  Override max output tokens per completion (LLMPerf-style)
+  flocust --mean-output-tokens M --stddev-output-tokens S  Per-request sampled max output tokens (LLMPerf-style)
   flocust -h, --help      Show this help and exit
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -226,6 +233,28 @@ Supported usage:
         dest="prompt_cache",
         help="Enable prompt caching (default: disabled so each request avoids cache for reproducible load tests).",
     )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="max_output_tokens",
+        help="Override max output tokens per completion (LLMPerf: single value for all requests).",
+    )
+    parser.add_argument(
+        "--mean-output-tokens",
+        type=int,
+        default=None,
+        metavar="M",
+        help="LLMPerf-style: mean output tokens; sample per request when used with --stddev-output-tokens.",
+    )
+    parser.add_argument(
+        "--stddev-output-tokens",
+        type=float,
+        default=None,
+        metavar="S",
+        help="LLMPerf-style: stddev for output tokens; use with --mean-output-tokens for per-request sampling.",
+    )
     return parser.parse_args()
 
 
@@ -244,8 +273,17 @@ def main() -> None:
 
     try:
         config = collect_config(config_path)
+        overrides: dict = {}
         if getattr(args, "prompt_cache", False):
-            config = config.model_copy(update={"prompt_cache": True})
+            overrides["prompt_cache"] = True
+        if getattr(args, "max_output_tokens", None) is not None:
+            overrides["max_output_tokens"] = args.max_output_tokens
+        if getattr(args, "mean_output_tokens", None) is not None:
+            overrides["mean_output_tokens"] = args.mean_output_tokens
+        if getattr(args, "stddev_output_tokens", None) is not None:
+            overrides["stddev_output_tokens"] = args.stddev_output_tokens
+        if overrides:
+            config = config.model_copy(update=overrides)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -257,10 +295,12 @@ def main() -> None:
         traceback.print_exc()
         sys.exit(1)
 
+    output_dir_resolved = Path(config.output_dir).resolve()
     print(
-        f"Config loaded: output_dir={config.output_dir}, "
+        f"Config loaded: output_dir={output_dir_resolved}, "
         f"generate_prompts={config.generate_prompts}, prompt_cache={config.prompt_cache}"
     )
+    print(f"Artifacts (results.jsonl + report.json) will be written to: {output_dir_resolved}")
     print("\nRunning load test...")
 
     try:
@@ -284,11 +324,16 @@ def main() -> None:
     report_path = out_dir / "report.json"
     try:
         write_report(report, report_path)
+        failures_path = out_dir / "failures.jsonl"
+        write_failures_file(report, failures_path)
         print(f"Output: {out_dir}")
         print(f"  {result_path.name}")
         print(f"  {report_path.name}")
+        if report.failed_requests > 0:
+            print(f"  {failures_path.name}")
     except OSError as e:
-        print(f"Warning: Could not write report: {e}")
+        print(f"Error: Could not write report: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         display_dashboard(report, results)

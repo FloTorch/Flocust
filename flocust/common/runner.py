@@ -34,6 +34,15 @@ FLUSH_EVERY_LINES = 10
 QUEUE_POLL_TIMEOUT = 0.1
 STOP_POLL_INTERVAL = 0.1
 
+
+def _sample_max_tokens(mean: int, stddev: float) -> int:
+    """Sample a positive int from Gaussian(mean, stddev). LLMPerf-style per-request max_output_tokens."""
+    val = -1
+    while val < 1:
+        val = int(round(random.gauss(mean, max(0.1, stddev))))
+    return min(128_000, max(1, val))
+
+
 def _usage_from_headers(headers) -> tuple[int, int]:
     """Extract input_tokens and output_tokens from response headers (e.g. x-input-tokens, x-completion-tokens)."""
     if headers is None:
@@ -258,13 +267,28 @@ class LLMUser(HttpUser):
         req_id, prompt = self._next_prompt()
         stream = self.environment.parsed_options.stream
         prompt_cache = getattr(self.environment.parsed_options, "prompt_cache", False)
+        instruct_output_tokens = getattr(self.environment.parsed_options, "instruct_output_tokens", True)
         # When prompt_cache is False (default), prepend a unique nonce so each request
         # has a different prefix → no OpenAI prompt cache hits (reproducible load tests).
         user_content = prompt if prompt_cache else f"[req:{req_id}]\n{prompt}"
+        mean_out = getattr(self.environment.parsed_options, "mean_output_tokens", None)
+        stddev_out = getattr(self.environment.parsed_options, "stddev_output_tokens", None)
+        if mean_out is not None and stddev_out is not None:
+            max_tokens = _sample_max_tokens(mean_out, stddev_out)
+        else:
+            max_tokens = self.environment.parsed_options.max_output_tokens
+        # LLMPerf-style: instruct in user prompt prefix (same place and wording as llmperf)
+        if instruct_output_tokens:
+            user_content = (
+                f"Respond to the following text with {max_tokens} output tokens. "
+                "Don't generate eos tokens:\n\n"
+                + user_content
+            )
+        messages = [{"role": "user", "content": user_content}]
         payload = {
             "model": self.environment.parsed_options.model,
-            "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": self.environment.parsed_options.max_tokens,
+            "messages": messages,
+            "max_tokens": max_tokens,
             "temperature": 0.0,
             "stream": stream,
         }
@@ -336,7 +360,8 @@ class LLMUser(HttpUser):
                     if status_code == 200:
                         response.success()
                     else:
-                        response.failure(f"HTTP {status_code}")
+                        error_msg = f"HTTP {status_code}"
+                        response.failure(error_msg)
             except Exception as e:
                 status_code = 0
                 error_msg = str(e)[:200]
@@ -510,12 +535,15 @@ def _run_experiment_programmatic(
     env.parsed_options = type("Options", (), {
         "api_key": config.api_key,
         "model": config.model,
-        "max_tokens": config.max_tokens,
+        "max_output_tokens": config.max_output_tokens,
+        "mean_output_tokens": getattr(config, "mean_output_tokens", None),
+        "stddev_output_tokens": getattr(config, "stddev_output_tokens", None),
         "prompts_path": str(config.prompts_path),
         "encoding": config.encoding,
         "timeout": timeout_tuple,
         "stream": config.stream,
         "prompt_cache": getattr(config, "prompt_cache", False),
+        "instruct_output_tokens": getattr(config, "instruct_output_tokens", True),
     })()
 
     # Pass test runner instance to users

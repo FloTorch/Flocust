@@ -8,17 +8,18 @@
   },
   "bench": {
     "concurrency": 10,
-    "requests": 50,
-    "requests_per_second": 5.0,
+    "requests": 100,
+    "requests_per_second": 0,
     "duration_sec": 0,
     "ramp_up_sec": 0,
-    "timeout_sec": 60,
-    "max_tokens": 1024,
+    "timeout_sec": 300,
+    "max_output_tokens": 1024,
     "stream": true,
+    "instruct_output_tokens": true,
     "generate_prompts": false,
     "generate_prompts_count": null
   },
-  "input_file": "./input_examples/prompt_128_tokens.jsonl",
+  "input_file": "./input_examples/prompts_1024.jsonl",
   "report": {
     "format": "console"
   }

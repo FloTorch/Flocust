@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from flocust.api.constants import DEFAULT_BASE_URL
-from flocust.common.models import ReportCard
+from flocust.common.models import FailedRequestDetail, ReportCard
 
 __all__ = [
     "ReportSummary",
@@ -52,6 +52,10 @@ class ReportSummary(BaseModel):
     total_tokens: int = Field(..., ge=0)
     average_tokens_per_sec: float | None = Field(default=None, ge=0)
     requests_per_second_actual: float = Field(..., ge=0)
+    failed_requests_detail: list[FailedRequestDetail] = Field(
+        default_factory=list,
+        description="List of failed requests with req_id, error reason, latency_ms, and optional prompt preview",
+    )
 
 
 def report_to_summary(report: ReportCard) -> ReportSummary:
@@ -90,6 +94,7 @@ def report_to_summary(report: ReportCard) -> ReportSummary:
         total_tokens=report.total_tokens,
         average_tokens_per_sec=report.average_tokens_per_sec,
         requests_per_second_actual=report.requests_per_second_actual,
+        failed_requests_detail=report.failed_requests_detail,
     )
 
 
@@ -115,8 +120,14 @@ class RunExperimentRequest(BaseModel):
         description="True: throttle to requests_per_second. False: max throughput.",
     )
     timeout_sec: int = Field(default=60, ge=1, le=300, description="Per-request timeout (seconds)")
-    max_tokens: int = Field(default=1024, ge=1, le=128_000, description="Max completion tokens")
+    max_output_tokens: int = Field(
+        default=1024, ge=1, le=128_000, description="Max output (completion) tokens per request"
+    )
     stream: bool = Field(default=True, description="Stream responses for TTFT/inter-token metrics")
+    instruct_output_tokens: bool = Field(
+        default=True,
+        description="Prepend user prompt with LLMPerf-style instruction: 'with N output tokens. Don't generate eos tokens'",
+    )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM (when no file uploaded)")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
     encoding: Literal["cl100k_base", "o200k_base", "p50k_base", "r50k_base"] = Field(

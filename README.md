@@ -119,7 +119,7 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
 | Section | Key fields |
 |--------|-------------|
 | **provider_settings** | `api_key`, `model`, `base_url` (supports `$ENV_VAR`) |
-| **bench** | `concurrency`, `requests`, `duration_sec`, `requests_per_second`, `timeout_sec`, `max_tokens`, `stream`, `generate_prompts`, `generate_prompts_count` |
+| **bench** | `concurrency`, `requests`, `duration_sec`, `requests_per_second`, `timeout_sec`, `max_output_tokens`, `stream`, `instruct_output_tokens`, `generate_prompts`, `generate_prompts_count` |
 | **input_file** | Path to prompts file (JSON/JSONL). Required if `generate_prompts` is false. |
 | **report** | `format`: `"console"` or `"json"` |
 
@@ -140,8 +140,9 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
     "duration_sec": 0,
     "ramp_up_sec": 0,
     "timeout_sec": 60,
-    "max_tokens": 1024,
+    "max_output_tokens": 1024,
     "stream": true,
+    "instruct_output_tokens": true,
     "generate_prompts": false,
     "generate_prompts_count": null
   },
@@ -151,6 +152,7 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
 ```
 
 - `duration_sec > 0`: run for that many seconds; otherwise the run stops after `requests` are completed.
+- `instruct_output_tokens: true` (default): prepends the user prompt with an LLMPerf-style instruction (“with N output tokens. Don't generate eos tokens”) for consistent load test metrics.
 - `generate_prompts: true`: prompts are generated via a one-shot LLM call; you can omit `input_file` and set `generate_prompts_count` (1–1000).
 
 ---
@@ -162,7 +164,38 @@ Use a JSON config file when running with `--config`. Set `base_url` to your prov
 | With config | `flocust -c config.json` |
 | Interactive | `flocust` (no `-c`) |
 
-Interactive prompts include: base URL, API key, model, concurrency, duration vs request count, RPS, timeout, max tokens, streaming, prompts source (file or LLM-generated), and prompts file path when using a file.
+Interactive prompts include: base URL, API key, model, concurrency, duration vs request count, RPS, timeout, max output tokens, streaming, prompts source (file or LLM-generated), and prompts file path when using a file.
+
+### CLI Flags
+
+**Max Output Tokens:**
+- `--max-output-tokens N` — Set a fixed max output tokens value for all requests. Every request will use exactly `N` tokens. Example: `flocust -c config.json --max-output-tokens 2048`
+
+- `--mean-output-tokens M --stddev-output-tokens S` — Use variable max output tokens per request (LLMPerf-style). Instead of using the same value for every request, each request gets a different `max_tokens` value sampled from a normal distribution:
+  - **Mean (`M`)**: The average/center value (e.g., 1024 means most requests will be around 1024 tokens)
+  - **Standard deviation (`S`)**: How much variation to allow (e.g., 256 means values will typically range from ~768 to ~1280 tokens)
+  
+  This simulates realistic load where different requests have different token requirements. Example: `flocust -c config.json --mean-output-tokens 1024 --stddev-output-tokens 256`
+  
+  **Note:** When both `--mean-output-tokens` and `--stddev-output-tokens` are provided, they override `--max-output-tokens` (or the config file value). Each request gets its own sampled value.
+
+**Other Options:**
+- `--prompt-cache` — Enable prompt caching (default: disabled for reproducible load tests). Example: `flocust -c config.json --prompt-cache`
+
+**Examples:**
+```bash
+# Run with fixed max output tokens override
+# All 100 requests will use exactly 2048 max tokens
+flocust -c config.json --max-output-tokens 2048
+
+# Run with variable max output tokens per request
+# Request 1 might get 980 tokens, request 2 gets 1050 tokens, request 3 gets 1100 tokens, etc.
+# Values are randomly sampled around 1024 (mean) with variation of ±256 (stddev)
+flocust -c config.json --mean-output-tokens 1024 --stddev-output-tokens 256
+
+# Combine flags
+flocust -c config.json --max-output-tokens 1024 --prompt-cache
+```
 
 ---
 
@@ -189,7 +222,7 @@ curl -X POST http://localhost:8000/api/run \
   -F "model=gpt-4o-mini" \
   -F "concurrency=2" \
   -F "num_requests=10" \
-  -F "max_tokens=1024"
+  -F "max_output_tokens=1024"
 ```
 
 ---

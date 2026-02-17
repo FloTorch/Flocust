@@ -174,6 +174,19 @@ def display_dashboard(report: ReportCard, results: list[RequestResult]) -> None:
     if report.average_tokens_per_sec is not None:
         summary += f" | Avg tokens/s: {_c(_fmt(report.average_tokens_per_sec), Colors.GREEN)}"
     print(summary)
+    failed_detail = getattr(report, "failed_requests_detail", None) or []
+    if failed_detail:
+        print()
+        print(_c("Failed requests (error reason):", Colors.RED))
+        for f in failed_detail:
+            err = getattr(f, "error", "?")
+            req_id = getattr(f, "req_id", "?")
+            lat = getattr(f, "latency_ms", 0)
+            preview = getattr(f, "input_prompt_preview", None)
+            line = f"  {_c(req_id, Colors.YELLOW)}  {err}  (latency: {lat:.0f} ms)"
+            if preview:
+                line += f"  prompt: \"{preview}\""
+            print(line)
     total_cached = getattr(report, "total_cached_tokens", 0) or 0
     cache_hits = getattr(report, "requests_with_cache_hit", 0) or 0
     if total_cached > 0 or cache_hits > 0:

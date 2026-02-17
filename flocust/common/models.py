@@ -4,7 +4,19 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-__all__ = ["RequestResult", "ReportCard"]
+__all__ = ["FailedRequestDetail", "RequestResult", "ReportCard"]
+
+
+class FailedRequestDetail(BaseModel):
+    """One failed request entry for the report."""
+
+    req_id: str = Field(..., description="Request identifier")
+    error: str = Field(..., description="Error reason (e.g. HTTP 503, timeout, Invalid JSON)")
+    latency_ms: float = Field(..., ge=0, description="Request latency in milliseconds")
+    input_prompt_preview: str | None = Field(
+        default=None,
+        description="Truncated prompt for context (e.g. first 200 chars)",
+    )
 
 
 class RequestResult(BaseModel):
@@ -106,3 +118,7 @@ class ReportCard(BaseModel):
     # Prompt cache (from usage.prompt_tokens_details.cached_tokens when reported by API)
     total_cached_tokens: int = Field(default=0, ge=0, description="Sum of cached_tokens across requests")
     requests_with_cache_hit: int = Field(default=0, ge=0, description="Number of requests with cached_tokens > 0")
+    failed_requests_detail: list[FailedRequestDetail] = Field(
+        default_factory=list,
+        description="List of failed requests with req_id, error reason, latency_ms, and optional prompt preview",
+    )

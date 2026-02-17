@@ -4,10 +4,16 @@ import json
 import math
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+
+def _artifact_timestamp() -> str:
+    """Return date and time for artifact dir names (YYYYMMDD-HHMMSS), sortable and unique per run."""
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 _ENV_VAR_PATTERN = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
 _ENV_VAR_PATTERN_ALT = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
@@ -45,7 +51,25 @@ class BenchSettings(BaseModel):
     duration_sec: float = Field(default=0, ge=0)
     ramp_up_sec: float = Field(default=0, ge=0)
     timeout_sec: int = Field(default=60, ge=1, le=300)
-    max_tokens: int = Field(default=1024, ge=1, le=128_000)
+    max_output_tokens: int = Field(
+        default=1024,
+        ge=1,
+        le=128_000,
+        description="Max output (completion) tokens per request; aligns with LLMPerf output-tokens naming",
+        validation_alias=AliasChoices("max_output_tokens", "max_tokens"),
+    )
+    mean_output_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=128_000,
+        description="LLMPerf-style: mean output tokens per request (sample per request when set with stddev_output_tokens)",
+    )
+    stddev_output_tokens: float | None = Field(
+        default=None,
+        ge=0,
+        le=10_000,
+        description="LLMPerf-style: stddev for output tokens; used with mean_output_tokens for per-request sampling",
+    )
     stream: bool = Field(default=True, description="Use streaming for TTFT/inter-token metrics")
     num_workers: int = Field(
         default=1, ge=1, le=64,
@@ -54,6 +78,10 @@ class BenchSettings(BaseModel):
     prompt_cache: bool = Field(
         default=False,
         description="Enable OpenAI-style prompt caching (default: disabled for reproducible load tests)",
+    )
+    instruct_output_tokens: bool = Field(
+        default=True,
+        description="Prepend user prompt with LLMPerf-style instruction (with N output tokens; Don't generate eos tokens) for consistent load test metrics",
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000, description="Number of prompts to generate")
@@ -82,11 +110,12 @@ def artifact_output_dir(
     requests_per_second: float,
     base: Path | None = None,
 ) -> Path:
-    """Return artifacts/{model}-users{N}-rps{R} for standardized output."""
+    """Return artifacts/{model}-users{N}-rps{R}-{YYYYMMDD-HHMMSS} for standardized output."""
     base = base or Path(".")
     slug = re.sub(r"[^\w\-.]", "-", model.replace("/", "-").strip()) or "model"
     rps = int(round(requests_per_second))
-    return base / "artifacts" / f"{slug}-users{concurrency}-rps{rps}"
+    ts = _artifact_timestamp()
+    return base / "artifacts" / f"{slug}-users{concurrency}-rps{rps}-{ts}"
 
 
 def normalize_base_url(url: str) -> str:
@@ -118,7 +147,21 @@ class RunConfig(BaseModel):
         ge=0.1, le=10_000.0,
         description="Target RPS when use_rps_throttle is True",
     )
-    max_tokens: int = Field(ge=1, le=128_000, default=1024, description="Max tokens per completion")
+    max_output_tokens: int = Field(
+        ge=1,
+        le=128_000,
+        default=1024,
+        description="Max output (completion) tokens per request; used when mean_output_tokens not set",
+        validation_alias=AliasChoices("max_output_tokens", "max_tokens"),
+    )
+    mean_output_tokens: int | None = Field(
+        default=None, ge=1, le=128_000,
+        description="LLMPerf-style: mean output tokens; sample per request when set with stddev_output_tokens",
+    )
+    stddev_output_tokens: float | None = Field(
+        default=None, ge=0, le=10_000,
+        description="LLMPerf-style: stddev for output tokens; used with mean_output_tokens",
+    )
     prompts_path: Path | None = Field(
         default=None,
         description="Path to prompts file. Required unless generate_prompts is True.",
@@ -143,6 +186,10 @@ class RunConfig(BaseModel):
     prompt_cache: bool = Field(
         default=False,
         description="Enable prompt caching; when False, each request is made unique to avoid cache hits",
+    )
+    instruct_output_tokens: bool = Field(
+        default=True,
+        description="Prepend user prompt with LLMPerf-style instruction (with N output tokens; Don't generate eos tokens)",
     )
     generate_prompts: bool = Field(default=False, description="Generate prompts via LLM before run")
     generate_prompts_count: int | None = Field(default=None, ge=1, le=1000)
@@ -206,7 +253,8 @@ def load_config_from_file(path: Path) -> RunConfig:
     # Assume up to 40s LLM latency; spawn users so RPS = users/latency >= target (do not cap by num_requests).
     assumed_latency_sec = 40.0
     num_users = max(target_rps, math.ceil(target_rps * assumed_latency_sec))
-    out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(target_rps)}"
+    ts = _artifact_timestamp()
+    out_dir = base / "artifacts" / f"{slug}_{bench.concurrency}_{bench.requests}_{int(target_rps)}-{ts}"
 
     # Resolve prompts path: bench.prompts_path overrides root input_file when set
     prompts_source = (bench.prompts_path or "").strip() or cfg.input_file.strip()
@@ -231,7 +279,9 @@ def load_config_from_file(path: Path) -> RunConfig:
         model=ps.model,
         concurrency=num_users,
         requests_per_second=float(target_rps),
-        max_tokens=bench.max_tokens,
+        max_output_tokens=bench.max_output_tokens,
+        mean_output_tokens=getattr(bench, "mean_output_tokens", None),
+        stddev_output_tokens=getattr(bench, "stddev_output_tokens", None),
         prompts_path=input_path,
         output_dir=out_dir,
         num_requests=bench.requests,
@@ -242,6 +292,7 @@ def load_config_from_file(path: Path) -> RunConfig:
         num_workers=num_workers,
         stream=bench.stream,
         prompt_cache=bench.prompt_cache,
+        instruct_output_tokens=bench.instruct_output_tokens,
         generate_prompts=bench.generate_prompts,
         generate_prompts_count=bench.generate_prompts_count,
         encoding="cl100k_base",
